@@ -796,7 +796,7 @@ async fn check_ffmpeg() -> bool {
 #[tauri::command]
 async fn probe_codecs(path: String) -> Result<String, String> {
     let v_out = tokio::process::Command::new("ffprobe")
-        .args(&["-v", "error", "-select_streams", "v:0",
+        .args(&["-v", "error", "-select_streams", "V:0",
                 "-show_entries", "stream=codec_name",
                 "-of", "default=noprint_wrappers=1:nokey=1", &path])
         .output().await.map_err(|e| e.to_string())?;
@@ -808,6 +808,129 @@ async fn probe_codecs(path: String) -> Result<String, String> {
     let video = String::from_utf8_lossy(&v_out.stdout).trim().to_string();
     let audio = String::from_utf8_lossy(&a_out.stdout).trim().to_string();
     Ok(format!("{}:{}", video, audio))
+}
+
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MediaInfo {
+    pub duration: f64,
+    pub streams: Vec<MediaStream>,
+    pub chapters: Vec<MediaChapter>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MediaChapter {
+    pub id: u64,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub title: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MediaStream {
+    pub index: u32,
+    pub codec_type: String,
+    pub codec_name: Option<String>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeOutput {
+    streams: Vec<FfprobeStream>,
+    format: Option<FfprobeFormat>,
+    chapters: Option<Vec<FfprobeChapter>>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeChapter {
+    id: u64,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    tags: Option<HashMap<String, String>>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeFormat {
+    duration: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeStream {
+    index: u32,
+    codec_type: String,
+    codec_name: Option<String>,
+    tags: Option<HashMap<String, String>>,
+}
+
+#[tauri::command]
+async fn get_media_info(path: String) -> Result<MediaInfo, String> {
+    let out = tokio::process::Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-show_format",
+            "-show_chapters",
+            &path,
+        ])
+        .output().await.map_err(|e| e.to_string())?;
+
+    let parsed: FfprobeOutput = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    
+    let mut streams = Vec::new();
+    for s in parsed.streams {
+        let mut lang = None;
+        let mut title = None;
+        if let Some(tags) = s.tags {
+            if let Some(l) = tags.get("language").or(tags.get("LANGUAGE")) {
+                lang = Some(l.clone());
+            }
+            if let Some(t) = tags.get("title").or(tags.get("TITLE")) {
+                title = Some(t.clone());
+            }
+        }
+        streams.push(MediaStream {
+            index: s.index,
+            codec_type: s.codec_type,
+            codec_name: s.codec_name,
+            language: lang,
+            title,
+        });
+    }
+
+    let mut duration = 0.0;
+    if let Some(format) = parsed.format {
+        if let Some(dur_str) = format.duration {
+            duration = dur_str.parse::<f64>().unwrap_or(0.0);
+        }
+    }
+
+    let mut chapters = Vec::new();
+    if let Some(ff_chapters) = parsed.chapters {
+        for c in ff_chapters {
+            let start = c.start_time.unwrap_or_default().parse::<f64>().unwrap_or(0.0);
+            let end = c.end_time.unwrap_or_default().parse::<f64>().unwrap_or(0.0);
+            let mut title = None;
+            if let Some(tags) = c.tags {
+                if let Some(t) = tags.get("title").or(tags.get("TITLE")) {
+                    title = Some(t.clone());
+                }
+            }
+            chapters.push(MediaChapter {
+                id: c.id,
+                start_time: start,
+                end_time: end,
+                title,
+            });
+        }
+    }
+
+    Ok(MediaInfo {
+        duration,
+        streams,
+        chapters,
+    })
 }
 
 // ─── TMDB Recommendations ──────────────────────────────────────────────────
@@ -858,6 +981,8 @@ async fn fetch_recommendations(
 struct StreamQuery {
     path: String,
     copy: Option<bool>,
+    a: Option<u32>,
+    start: Option<f64>,
 }
 
 async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
@@ -881,7 +1006,20 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
             .unwrap();
     }
 
-    let mut args: Vec<String> = vec!["-i".into(), path.clone()];
+    let mut args: Vec<String> = Vec::new();
+    if let Some(start_time) = q.start {
+        args.extend(["-ss".into(), start_time.to_string()]);
+    }
+    args.extend(["-i".into(), path.clone()]);
+    
+    args.extend(["-map".into(), "0:V:0".into()]);
+    if let Some(a_idx) = q.a {
+        args.extend(["-map".into(), format!("0:{}", a_idx)]);
+    } else {
+        args.extend(["-map".into(), "0:a:0".into()]);
+    }
+    args.extend(["-sn".into()]);
+
     if use_copy {
         args.extend(["-c:v".into(), "copy".into(), "-c:a".into(), "copy".into()]);
     } else {
@@ -889,6 +1027,7 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
             "-c:v".into(), "libx264".into(),
             "-preset".into(), "veryfast".into(),
             "-crf".into(), "23".into(),
+            "-pix_fmt".into(), "yuv420p".into(),
             "-c:a".into(), "aac".into(),
             "-b:a".into(), "192k".into(),
         ]);
@@ -923,10 +1062,65 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
     }
 }
 
+#[derive(Deserialize)]
+struct SubtitleQuery {
+    path: String,
+    s: u32,
+    start: Option<f64>,
+}
+
+async fn subtitle_handler(Query(q): Query<SubtitleQuery>) -> impl IntoResponse {
+    let path = q.path;
+    let s_idx = q.s;
+
+    if !Path::new(&path).exists() {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("File not found"))
+            .unwrap();
+    }
+
+    let mut args: Vec<String> = Vec::new();
+    if let Some(start_time) = q.start {
+        args.extend(["-ss".into(), start_time.to_string()]);
+    }
+    args.extend(["-i".into(), path.clone()]);
+    
+    args.extend([
+        "-map".into(), format!("0:{}", s_idx),
+        "-f".into(), "webvtt".into(),
+        "pipe:1".into(),
+    ]);
+
+    let child = tokio::process::Command::new("ffmpeg")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+
+    match child {
+        Err(e) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from(format!("Failed to start FFmpeg for subtitle: {}", e)))
+            .unwrap(),
+        Ok(mut child) => {
+            let stdout = child.stdout.take().expect("no stdout");
+            let stream = tokio_util::io::ReaderStream::new(stdout);
+            let body = axum::body::Body::from_stream(stream);
+            axum::response::Response::builder()
+                .header("Content-Type", "text/vtt")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(body)
+                .unwrap()
+        }
+    }
+}
+
 fn start_streaming_server() {
     tauri::async_runtime::spawn(async move {
         let app = axum::Router::new()
             .route("/stream", axum::routing::get(stream_handler))
+            .route("/subtitle", axum::routing::get(subtitle_handler))
             .layer(tower_http::cors::CorsLayer::permissive());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:1421").await.unwrap();
@@ -953,6 +1147,7 @@ fn main() {
             check_ffmpeg,
             probe_codecs,
             fetch_recommendations,
+            get_media_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
