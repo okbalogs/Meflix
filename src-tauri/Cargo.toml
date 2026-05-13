@@ -28,6 +28,8 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 regex = "1"
 dirs = "6"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 open = "5.1.4"
 axum = "0.7"
 tokio-util = { version = "0.7", features = ["io"] }
