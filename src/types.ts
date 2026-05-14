@@ -66,3 +66,16 @@ export interface MediaInfo {
   streams: MediaStream[];
   chapters: MediaChapter[];
 }
+
+// mpv track-list entry (from mpv IPC observe_property track-list)
+export interface MpvTrack {
+  id: number;
+  type: "audio" | "sub" | "video";
+  lang?: string;
+  title?: string;
+  codec?: string;
+  selected?: boolean;
+  default?: boolean;
+  forced?: boolean;
+  "external-filename"?: string;
+}

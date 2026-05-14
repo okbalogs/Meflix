@@ -14,6 +14,8 @@ use axum::extract::Query;
 #[cfg(not(target_os = "android"))]
 use axum::response::IntoResponse;
 #[cfg(not(target_os = "android"))]
+use tauri::Emitter;
+#[cfg(not(target_os = "android"))]
 use std::process::Stdio;
 
 // ─── Data Structures ───────────────────────────────────────────────────────
@@ -1108,6 +1110,244 @@ fn start_streaming_server() {
     });
 }
 
+// ─── mpv IPC Player ────────────────────────────────────────────────────────
+
+#[cfg(not(target_os = "android"))]
+const MPV_SOCKET: &str = "/tmp/meflix-mpv.sock";
+
+#[cfg(not(target_os = "android"))]
+pub struct MpvInner {
+    handle: Option<tokio::process::Child>,
+}
+
+#[cfg(not(target_os = "android"))]
+pub struct MpvState(pub std::sync::Mutex<MpvInner>);
+
+// Fire-and-forget: open a fresh connection, write the command, close.
+#[cfg(not(target_os = "android"))]
+async fn mpv_send(cmd: serde_json::Value) -> Result<(), String> {
+    use tokio::net::UnixStream;
+    use tokio::io::AsyncWriteExt;
+    let mut stream = UnixStream::connect(MPV_SOCKET)
+        .await
+        .map_err(|e| format!("mpv not responding ({}). Is it running?", e))?;
+    let msg = format!("{}\n", cmd);
+    stream.write_all(msg.as_bytes()).await.map_err(|e| e.to_string())
+}
+
+// Background task: observe mpv properties and forward them as Tauri events.
+#[cfg(not(target_os = "android"))]
+fn start_mpv_event_loop(app: tauri::AppHandle) {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        // Poll for socket (up to 5 s)
+        for _ in 0..50 {
+            if Path::new(MPV_SOCKET).exists() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        if !Path::new(MPV_SOCKET).exists() {
+            return;
+        }
+
+        let stream = match UnixStream::connect(MPV_SOCKET).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (read_half, mut write_half) = stream.into_split();
+
+        // Subscribe to all properties we need
+        let observations: &[&str] = &[
+            r#"{"command":["observe_property",1,"time-pos"]}"#,
+            r#"{"command":["observe_property",2,"duration"]}"#,
+            r#"{"command":["observe_property",3,"pause"]}"#,
+            r#"{"command":["observe_property",4,"eof-reached"]}"#,
+            r#"{"command":["observe_property",5,"paused-for-cache"]}"#,
+            r#"{"command":["observe_property",6,"track-list"]}"#,
+            r#"{"command":["observe_property",7,"fullscreen"]}"#,
+            r#"{"command":["observe_property",8,"volume"]}"#,
+        ];
+        for obs in observations {
+            if write_half.write_all(format!("{}\n", obs).as_bytes()).await.is_err() {
+                return;
+            }
+        }
+
+        let mut lines = BufReader::new(read_half).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if json.get("event").and_then(|e| e.as_str()) != Some("property-change") {
+                continue;
+            }
+            let name = json["name"].as_str().unwrap_or("");
+            let data = &json["data"];
+            match name {
+                "time-pos" => {
+                    if let Some(pos) = data.as_f64() {
+                        app.emit("mpv://position", pos).ok();
+                    }
+                }
+                "duration" => {
+                    if let Some(dur) = data.as_f64() {
+                        app.emit("mpv://duration", dur).ok();
+                    }
+                }
+                "pause" => {
+                    app.emit("mpv://paused", data.as_bool().unwrap_or(false)).ok();
+                }
+                "eof-reached" => {
+                    if data.as_bool() == Some(true) {
+                        app.emit("mpv://ended", ()).ok();
+                    }
+                }
+                "paused-for-cache" => {
+                    app.emit("mpv://buffering", data.as_bool().unwrap_or(false)).ok();
+                }
+                "track-list" => {
+                    app.emit("mpv://track-list", data).ok();
+                }
+                "fullscreen" => {
+                    app.emit("mpv://fullscreen", data.as_bool().unwrap_or(false)).ok();
+                }
+                "volume" => {
+                    if let Some(vol) = data.as_f64() {
+                        // Normalise mpv 0-100 → 0-1 for the frontend
+                        app.emit("mpv://volume", vol / 100.0).ok();
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+// ── Commands ────────────────────────────────────────────────────────────────
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_open(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MpvState>,
+    path: String,
+    start: Option<f64>,
+    aid: Option<u32>,
+    sid: Option<i32>,
+) -> Result<(), String> {
+    // Kill any running mpv first (don't hold the lock across .await)
+    let old = { state.0.lock().unwrap().handle.take() };
+    if let Some(mut child) = old {
+        child.kill().await.ok();
+        // Brief pause so the socket file is released before we recreate it
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    }
+    let _ = std::fs::remove_file(MPV_SOCKET);
+
+    let mut args: Vec<String> = vec![
+        format!("--input-ipc-server={}", MPV_SOCKET),
+        "--keep-open=always".into(),
+        "--force-window=yes".into(),
+        "--osd-level=0".into(),
+        "--no-terminal".into(),
+        "--really-quiet".into(),
+        "--hr-seek=yes".into(),
+        "--hr-seek-framedrop=no".into(),
+    ];
+    if let Some(t) = start {
+        if t > 0.5 {
+            args.push(format!("--start={}", t));
+        }
+    }
+    if let Some(a) = aid {
+        args.push(format!("--aid={}", a));
+    }
+    match sid {
+        Some(s) if s < 0 => args.push("--sid=no".into()),
+        Some(s) => args.push(format!("--sid={}", s)),
+        None => {}
+    }
+    args.push(path); // file path must be last
+
+    let child = tokio::process::Command::new("mpv")
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("Failed to start mpv: {}. Install with: sudo apt install mpv", e))?;
+
+    state.0.lock().unwrap().handle = Some(child);
+    start_mpv_event_loop(app);
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_stop(state: tauri::State<'_, MpvState>) -> Result<(), String> {
+    let old = { state.0.lock().unwrap().handle.take() };
+    if let Some(mut child) = old {
+        child.kill().await.ok();
+    }
+    let _ = std::fs::remove_file(MPV_SOCKET);
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_set_paused(paused: bool) -> Result<(), String> {
+    mpv_send(serde_json::json!({"command": ["set_property", "pause", paused]})).await
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_seek(position: f64) -> Result<(), String> {
+    mpv_send(serde_json::json!({"command": ["seek", position, "absolute"]})).await
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_set_volume(volume: f64) -> Result<(), String> {
+    // frontend sends 0-1, mpv expects 0-100
+    let vol = (volume * 100.0).clamp(0.0, 200.0);
+    mpv_send(serde_json::json!({"command": ["set_property", "volume", vol]})).await
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_set_audio_track(id: u32) -> Result<(), String> {
+    mpv_send(serde_json::json!({"command": ["set_property", "aid", id]})).await
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_set_subtitle_track(id: i32) -> Result<(), String> {
+    if id < 0 {
+        mpv_send(serde_json::json!({"command": ["set_property", "sid", "no"]})).await
+    } else {
+        mpv_send(serde_json::json!({"command": ["set_property", "sid", id]})).await
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_set_fullscreen(fullscreen: bool) -> Result<(), String> {
+    mpv_send(serde_json::json!({"command": ["set_property", "fullscreen", fullscreen]})).await
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn mpv_check() -> bool {
+    tokio::process::Command::new("mpv")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 // ─── App Entry Point ───────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1118,6 +1358,7 @@ pub fn run() {
     #[cfg(not(target_os = "android"))]
     {
         tauri::Builder::default()
+            .manage(MpvState(std::sync::Mutex::new(MpvInner { handle: None })))
             .plugin(tauri_plugin_fs::init())
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_opener::init())
@@ -1132,6 +1373,15 @@ pub fn run() {
                 probe_codecs,
                 fetch_recommendations,
                 get_media_info,
+                mpv_open,
+                mpv_stop,
+                mpv_set_paused,
+                mpv_seek,
+                mpv_set_volume,
+                mpv_set_audio_track,
+                mpv_set_subtitle_track,
+                mpv_set_fullscreen,
+                mpv_check,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

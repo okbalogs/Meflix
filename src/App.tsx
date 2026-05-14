@@ -116,13 +116,14 @@ export default function App() {
   }, []);
 
   // Internal: actually start playback (no resume check)
+  // mpv receives the raw file path directly — no URL routing needed
   const startPlayItem = useCallback(async (item: MediaItem, startPath?: string, resumeAt?: number) => {
     setPlayingItem(item);
     setPlayingInitialTime(resumeAt || 0);
     if (item.media_type === "movie") {
       const path = startPath || item.video_files[0];
       if (!path) return;
-      setPlayingVideoPath(await toPlaySrc(path, null, resumeAt || null));
+      setPlayingVideoPath(path);
       setPlayingTitle(item.name);
       setPlayingQueue([{ path, title: item.name }]);
       setPlayingQueueIdx(0);
@@ -130,7 +131,7 @@ export default function App() {
       const q = buildSeriesQueue(item);
       if (q.length === 0) return;
       const idx = startPath ? Math.max(0, q.findIndex(e => e.path === startPath)) : 0;
-      setPlayingVideoPath(await toPlaySrc(q[idx].path, null, resumeAt || null));
+      setPlayingVideoPath(q[idx].path);
       setPlayingTitle(q[idx].title);
       setPlayingQueue(q);
       setPlayingQueueIdx(idx);
@@ -186,11 +187,11 @@ export default function App() {
     }
   }, [startPlayItem]);
 
-  const handleNext = useCallback(async () => {
+  const handleNext = useCallback(() => {
     const nextIdx = playingQueueIdx + 1;
     if (nextIdx >= playingQueue.length) return;
     const next = playingQueue[nextIdx];
-    setPlayingVideoPath(await toPlaySrc(next.path));
+    setPlayingVideoPath(next.path);
     setPlayingTitle(next.title);
     setPlayingQueueIdx(nextIdx);
   }, [playingQueueIdx, playingQueue]);
@@ -390,7 +391,7 @@ export default function App() {
       {playingVideoPath && (
         <VideoPlayer
           src={playingVideoPath}
-          rawPath={playingQueue[playingQueueIdx]?.path}
+          rawPath={playingQueue[playingQueueIdx]?.path ?? playingVideoPath}
           title={playingTitle}
           initialTime={playingInitialTime}
           onClose={closePlayer}
@@ -400,10 +401,6 @@ export default function App() {
           apiKey={settings.tmdb_api_key}
           onShowDetail={(item) => { closePlayer(); setDetailItem(item); setSelectedSeason(item.seasons[0]?.number || 1); }}
           onToast={showToast}
-          onAudioChange={async (audioIdx, start) => {
-            const path = playingQueue[playingQueueIdx]?.path;
-            if (path) setPlayingVideoPath(await toPlaySrc(path, audioIdx, start));
-          }}
         />
       )}
     </div>

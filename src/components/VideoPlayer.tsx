@@ -1,33 +1,35 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { MediaItem, TmdbRecommendation, MediaStream, MediaInfo, MediaChapter } from "../types";
+import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import type { MediaItem, TmdbRecommendation, MediaInfo, MediaChapter, MpvTrack } from "../types";
 import { saveWatchRecord } from "../progressStore";
 
-const getLanguageName = (code?: string | null) => {
-  if (!code || code === 'und') return null;
+const getTrackLabel = (track: MpvTrack, fallbackIndex: number, type: "Audio" | "Subtitle"): string => {
+  let name: string;
   try {
-    return new Intl.DisplayNames(['en'], { type: 'language' }).of(code);
+    name =
+      track.lang && track.lang !== "und"
+        ? new Intl.DisplayNames(["en"], { type: "language" }).of(track.lang) || track.lang.toUpperCase()
+        : `${type} Track ${fallbackIndex + 1}`;
   } catch {
-    return code.toUpperCase();
+    name = `${type} Track ${fallbackIndex + 1}`;
   }
-};
-
-const getTrackName = (s: MediaStream, fallbackIndex: number, type: "Audio" | "Subtitle") => {
-  const lang = getLanguageName(s.language);
-  let name = lang || `${type} Track ${fallbackIndex + 1}`;
-  
-  // Use title only if it's short and doesn't look spammy
-  if (s.title && s.title.length < 25 && !s.title.match(/http|\.com|\.cc|\.net|\.org/i)) {
-    name += ` - ${s.title}`;
-  } else if (s.codec_name) {
-    const codecMap: Record<string, string> = { subrip: "SRT", aac: "AAC", ac3: "AC3", eac3: "E-AC3", dts: "DTS", truehd: "TrueHD", flac: "FLAC", ass: "ASS", hdmv_pgs_subtitle: "PGS" };
-    name += ` [${codecMap[s.codec_name] || s.codec_name.toUpperCase()}]`;
+  if (track.title && track.title.length < 30 && !track.title.match(/http|\.com|\.cc|\.net/i)) {
+    name += ` - ${track.title}`;
+  } else if (track.codec) {
+    const codecMap: Record<string, string> = {
+      subrip: "SRT", aac: "AAC", ac3: "AC3", eac3: "E-AC3",
+      dts: "DTS", truehd: "TrueHD", flac: "FLAC", ass: "ASS",
+      hdmv_pgs_subtitle: "PGS", hdmv_pgs: "PGS", opus: "Opus", vorbis: "Vorbis",
+    };
+    name += ` [${codecMap[track.codec] || track.codec.toUpperCase()}]`;
   }
   return name;
 };
 
 interface VideoPlayerProps {
-  src: string;
+  src: string;           // kept for interface compat — mpv uses rawPath instead
   rawPath: string;
   title: string;
   initialTime?: number;
@@ -38,22 +40,29 @@ interface VideoPlayerProps {
   apiKey?: string | null;
   onShowDetail?: (item: MediaItem) => void;
   onToast?: (msg: string) => void;
-  onAudioChange?: (audioIdx: number, start?: number) => void;
+  onAudioChange?: (audioIdx: number, start?: number) => void; // kept for compat, not called
 }
 
 export default function VideoPlayer({
-  src, rawPath, title, initialTime, onClose, onNext, nextTitle, playingItem, apiKey, onShowDetail, onToast, onAudioChange,
+  rawPath, title, initialTime, onClose, onNext, nextTitle,
+  playingItem, apiKey, onShowDetail, onToast,
 }: VideoPlayerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const playerRef = useRef<HTMLDivElement>(null);
+  // ── mpv-driven state ─────────────────────────────────────────────────────
   const [playing, setPlaying] = useState(true);
-  const [progress, setProgress] = useState(0);
+  const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [showControls, setShowControls] = useState(true);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [mpvFullscreen, setMpvFullscreen] = useState(false);
+  const [mpvTracks, setMpvTracks] = useState<MpvTrack[]>([]);
+  const [currentAudioId, setCurrentAudioId] = useState<number | null>(null);
+  const [currentSubtitleId, setCurrentSubtitleId] = useState<number | null>(null);
+
+  // ── UI state (unchanged from HTML5 version) ───────────────────────────────
+  const [showControls, setShowControls] = useState(true);
   const [centerIcon, setCenterIcon] = useState<string | null>(null);
   const [showUpNext, setShowUpNext] = useState(false);
   const [upNextCountdown, setUpNextCountdown] = useState(10);
@@ -62,225 +71,190 @@ export default function VideoPlayer({
   const [settingIntro, setSettingIntro] = useState(false);
   const [recommendations, setRecommendations] = useState<TmdbRecommendation[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [streams, setStreams] = useState<MediaStream[]>([]);
   const [introChapter, setIntroChapter] = useState<MediaChapter | null>(null);
   const [creditsChapter, setCreditsChapter] = useState<MediaChapter | null>(null);
-  const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [showTracks, setShowTracks] = useState(false);
-  const [activeSrc, setActiveSrc] = useState(src);
-  const [streamOffset, setStreamOffset] = useState(0);
-  const [mediaDuration, setMediaDuration] = useState(0);
+
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const playerRef = useRef<HTMLDivElement>(null);
+  const progressTrackRef = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<number | null>(null);
   const centerTimerRef = useRef<number | null>(null);
   const upNextShownRef = useRef(false);
   const dismissedUpNextRef = useRef(false);
-  const isSeekingRef = useRef(false);
   const suggestionsShownRef = useRef(false);
-  const progressTrackRef = useRef<HTMLDivElement>(null);
+  const isSeekingRef = useRef(false);
+  const prevVolumeRef = useRef(1);
 
-  // Stable refs for progress saving (avoid stale closures in intervals/cleanup)
+  // Stable refs — let zero-dep effects and keyboard handler read current values
   const rawPathRef = useRef(rawPath);
-  const streamOffsetRef = useRef(0);
-  const mediaDurationRef = useRef(0);
-  useEffect(() => { rawPathRef.current = rawPath; }, [rawPath]);
-  useEffect(() => { streamOffsetRef.current = streamOffset; }, [streamOffset]);
-  useEffect(() => { mediaDurationRef.current = mediaDuration; }, [mediaDuration]);
+  const positionRef = useRef(0);
+  const durationRef = useRef(0);
+  const playingRef = useRef(true);
+  const mutedRef = useRef(false);
+  const volumeRef = useRef(1);
+  const mpvFullscreenRef = useRef(false);
+  const onNextRef = useRef(onNext);
+  const onCloseRef = useRef(onClose);
+  const initialTimeRef = useRef(initialTime || 0);
 
+  useEffect(() => { rawPathRef.current = rawPath; }, [rawPath]);
+  useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { durationRef.current = duration; }, [duration]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { mutedRef.current = muted; }, [muted]);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+  useEffect(() => { mpvFullscreenRef.current = mpvFullscreen; }, [mpvFullscreen]);
+  useEffect(() => { onNextRef.current = onNext; }, [onNext]);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  useEffect(() => { initialTimeRef.current = initialTime || 0; }, [initialTime]);
+
+  // ── Progress saving (uses refs — no stale closures) ───────────────────────
   const saveCurrentProgress = useCallback(() => {
-    if (!rawPathRef.current || !videoRef.current) return;
-    const current = streamOffsetRef.current + videoRef.current.currentTime;
-    const dur = mediaDurationRef.current > 0 ? mediaDurationRef.current : (videoRef.current.duration || 0);
-    if (dur > 0 && current > 2) {
-      saveWatchRecord(rawPathRef.current, { progress: current, duration: dur, updatedAt: Date.now() });
+    const pos = positionRef.current;
+    const dur = durationRef.current;
+    if (dur > 0 && pos > 2) {
+      saveWatchRecord(rawPathRef.current, { progress: pos, duration: dur, updatedAt: Date.now() });
     }
   }, []);
 
-  // Save every 5 seconds
   useEffect(() => {
     const id = window.setInterval(saveCurrentProgress, 5000);
     return () => clearInterval(id);
   }, [saveCurrentProgress]);
 
-  // Save on unmount (player closed)
   useEffect(() => () => { saveCurrentProgress(); }, [saveCurrentProgress]);
 
-  const resetControlsTimer = useCallback(() => {
-    setShowControls(true);
-    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
-    controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 3000);
-  }, []);
-
-  // Reset everything when src changes (new episode loaded)
+  // ── Open mpv whenever rawPath changes (including initial mount) ───────────
   useEffect(() => {
-    setActiveSrc(src);
-    const t = initialTime || 0;
-    setStreamOffset(t);
-    setProgress(t);
-    setPlaying(true); setDuration(0);
-    setIsBuffering(true); setHasError(false); setCenterIcon(null);
+    // Reset everything for the new file
+    setPosition(0); positionRef.current = 0;
+    setDuration(0); durationRef.current = 0;
+    setMpvTracks([]); setCurrentAudioId(null); setCurrentSubtitleId(null);
+    setPlaying(true); setIsBuffering(true); setHasError(false); setErrorMsg("");
     setShowUpNext(false); setUpNextCountdown(10); setShowIntroBtn(false);
-    setShowSuggestions(false); setRecommendations([]);
-    setShowTracks(false);
-    upNextShownRef.current = false; dismissedUpNextRef.current = false;
+    setShowSuggestions(false); setRecommendations([]); setShowTracks(false);
+    upNextShownRef.current = false;
+    dismissedUpNextRef.current = false;
     suggestionsShownRef.current = false;
     setShowControls(true);
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 3500);
-    if (videoRef.current) videoRef.current.load();
-  }, [src]);
 
-  // Fetch streams, duration, and chapters on rawPath change
-  useEffect(() => {
-    if (!rawPath) return;
-    invoke<MediaInfo>("get_media_info", { path: rawPath })
-      .then(info => {
-        setStreams(info.streams);
-        if (info.duration > 0) setMediaDuration(info.duration);
-        
-        // Find Intro and Credits chapters using robust regex
-        let intro = info.chapters.find(c => c.title && /^(intro|opening|op\b)/i.test(c.title));
-        let credits = info.chapters.find(c => c.title && /^(credits|ending|ed\b|outro)/i.test(c.title));
-        
-        // Fallback: if no named chapters, use position heuristics
-        if (info.chapters.length > 1) {
-          if (!credits) credits = info.chapters[info.chapters.length - 1];
-          
-          if (!intro) {
-            const first = info.chapters[0];
-            const length = first.end_time - first.start_time;
-            if (length > 0 && length < 300) intro = first; // Intro is usually short (< 5 mins)
-          }
-        }
+    const startSec = initialTimeRef.current;
+    invoke<void>("mpv_open", {
+      path: rawPath,
+      start: startSec > 0.5 ? startSec : null,
+      sid: -1, // subtitles off by default; user selects via track panel
+    }).catch((e: unknown) => {
+      const msg = String(e);
+      setHasError(true);
+      setErrorMsg(msg.includes("mpv") ? msg : "Failed to start mpv. Install it with: sudo apt install mpv");
+      setIsBuffering(false);
+      if (onToast) onToast("mpv not found — install mpv to play media.");
+    });
+  }, [rawPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
-        setIntroChapter(intro || null);
-        setCreditsChapter(credits || null);
-      })
-      .catch(e => console.error("Failed to get media info:", e));
-  }, [rawPath]);
-
+  // ── Stop mpv when the player is closed ───────────────────────────────────
   useEffect(() => {
     return () => {
+      invoke("mpv_stop").catch(() => {});
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
       if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
     };
   }, []);
 
-  // Up Next countdown
+  // ── mpv IPC event subscriptions (registered once, use refs for callbacks) ─
   useEffect(() => {
-    if (!showUpNext) return;
-    if (onNext) {
-      if (upNextCountdown <= 0) { onNext(); return; }
-      const t = window.setTimeout(() => setUpNextCountdown(c => c - 1), 1000);
-      return () => clearTimeout(t);
-    }
-  }, [showUpNext, upNextCountdown, onNext]);
+    const unlisteners: Array<() => void> = [];
 
-  // Fetch recommendations when suggestions overlay shows
-  useEffect(() => {
-    if (!showSuggestions || !playingItem?.tmdb_id || !apiKey) return;
-    invoke<TmdbRecommendation[]>("fetch_recommendations", {
-      tmdbId: playingItem.tmdb_id, mediaType: playingItem.media_type, apiKey,
-    }).then(setRecommendations).catch(() => {});
-  }, [showSuggestions, playingItem, apiKey]);
+    listen<number>("mpv://position", ({ payload }) => {
+      positionRef.current = payload;
+      if (!isSeekingRef.current) setPosition(payload);
+      setIsBuffering(false);
+    }).then(fn => unlisteners.push(fn));
 
-  // Force subtitle track to show when dynamically added
+    listen<number>("mpv://duration", ({ payload }) => {
+      durationRef.current = payload;
+      setDuration(payload);
+    }).then(fn => unlisteners.push(fn));
+
+    listen<boolean>("mpv://paused", ({ payload }) => {
+      setPlaying(!payload);
+    }).then(fn => unlisteners.push(fn));
+
+    listen<null>("mpv://ended", () => {
+      saveCurrentProgress();
+      if (onNextRef.current) {
+        onNextRef.current();
+      } else if (!suggestionsShownRef.current) {
+        suggestionsShownRef.current = true;
+        setShowSuggestions(true);
+      }
+    }).then(fn => unlisteners.push(fn));
+
+    listen<boolean>("mpv://buffering", ({ payload }) => {
+      if (payload) setIsBuffering(true);
+    }).then(fn => unlisteners.push(fn));
+
+    listen<MpvTrack[]>("mpv://track-list", ({ payload }) => {
+      if (!Array.isArray(payload)) return;
+      setMpvTracks(payload);
+      const audioSel = payload.find(t => t.type === "audio" && t.selected);
+      if (audioSel) setCurrentAudioId(audioSel.id);
+      const subSel = payload.find(t => t.type === "sub" && t.selected);
+      setCurrentSubtitleId(subSel?.id ?? null);
+    }).then(fn => unlisteners.push(fn));
+
+    listen<boolean>("mpv://fullscreen", ({ payload }) => {
+      setMpvFullscreen(payload);
+      mpvFullscreenRef.current = payload;
+    }).then(fn => unlisteners.push(fn));
+
+    listen<number>("mpv://volume", ({ payload }) => {
+      setVolume(payload);
+      volumeRef.current = payload;
+      setMuted(payload === 0);
+    }).then(fn => unlisteners.push(fn));
+
+    return () => unlisteners.forEach(fn => fn());
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Chapters via ffprobe (FFmpeg utilities preserved) ─────────────────────
   useEffect(() => {
-    if (selectedSubtitle !== null && videoRef.current) {
-      const timer = setTimeout(() => {
-        if (!videoRef.current) return;
-        const tracks = videoRef.current.textTracks;
-        for (let i = 0; i < tracks.length; i++) {
-          tracks[i].mode = 'showing';
+    if (!rawPath) return;
+    invoke<MediaInfo>("get_media_info", { path: rawPath })
+      .then(info => {
+        let intro = info.chapters.find(c => c.title && /^(intro|opening|op\b)/i.test(c.title));
+        let credits = info.chapters.find(c => c.title && /^(credits|ending|ed\b|outro)/i.test(c.title));
+        if (info.chapters.length > 1) {
+          if (!credits) credits = info.chapters[info.chapters.length - 1];
+          if (!intro) {
+            const first = info.chapters[0];
+            if (first.end_time - first.start_time < 300) intro = first;
+          }
         }
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [selectedSubtitle, activeSrc]);
+        setIntroChapter(intro ?? null);
+        setCreditsChapter(credits ?? null);
+      })
+      .catch(() => {});
+  }, [rawPath]);
 
-  const flashCenter = (icon: string) => {
-    setCenterIcon(icon);
-    if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
-    centerTimerRef.current = window.setTimeout(() => setCenterIcon(null), 700);
-  };
-
-  const togglePlay = useCallback(() => {
-    if (!videoRef.current) return;
-    if (videoRef.current.paused) { videoRef.current.play(); setPlaying(true); flashCenter("▶"); }
-    else { videoRef.current.pause(); setPlaying(false); flashCenter("⏸"); }
-  }, []);
-
-  const triggerSeek = useCallback((newTime: number) => {
-    if (activeSrc.includes("/stream")) {
-      try {
-        const url = new URL(activeSrc);
-        url.searchParams.set("start", newTime.toString());
-        setActiveSrc(url.toString());
-        setStreamOffset(newTime);
-        setIsBuffering(true);
-        setProgress(newTime);
-      } catch {
-        if (videoRef.current) videoRef.current.currentTime = newTime;
-      }
-    } else {
-      if (videoRef.current) videoRef.current.currentTime = newTime;
-      setProgress(newTime);
-    }
-  }, [activeSrc]);
-
-  const skip = useCallback((amount: number) => {
-    const currentVirtualTime = streamOffset + (videoRef.current?.currentTime || 0);
-    const target = Math.max(0, currentVirtualTime + amount);
-    triggerSeek(target);
-  }, [streamOffset, triggerSeek]);
-
-  const toggleMute = useCallback(() => {
-    if (!videoRef.current) return;
-    const next = !videoRef.current.muted;
-    videoRef.current.muted = next;
-    setMuted(next);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else playerRef.current?.requestFullscreen();
-  }, []);
-
+  // ── Skip Intro / Up Next driven by position ───────────────────────────────
   useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-      switch (e.key) {
-        case " ": case "k": e.preventDefault(); togglePlay(); break;
-        case "ArrowLeft": e.preventDefault(); skip(-15); break;
-        case "ArrowRight": e.preventDefault(); skip(15); break;
-        case "m": e.preventDefault(); toggleMute(); break;
-        case "f": e.preventDefault(); toggleFullscreen(); break;
-        case "n": if (onNext) { e.preventDefault(); onNext(); } break;
-        case "Escape": if (!document.fullscreenElement) onClose(); break;
-      }
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [togglePlay, skip, toggleMute, toggleFullscreen, onClose, onNext]);
-
-  const handleTimeUpdate = () => {
-    if (!videoRef.current || isSeekingRef.current) return;
-    const current = streamOffset + videoRef.current.currentTime;
-    const dur = mediaDuration > 0 ? mediaDuration : (videoRef.current.duration || 0);
-    setProgress(current);
-    setDuration(dur);
-    
-    // Skip Intro logic
-    if (introChapter && current >= introChapter.start_time && current < introChapter.end_time) {
+    if (introChapter && position >= introChapter.start_time && position < introChapter.end_time) {
       setShowIntroBtn(true);
-    } else if (introEnd > 0 && current >= 0 && current < introEnd) {
+    } else if (introEnd > 0 && position < introEnd) {
       setShowIntroBtn(true);
     } else {
       setShowIntroBtn(false);
     }
-    
-    // Up Next / Endscreen logic
-    const isCreditsTime = creditsChapter ? (current >= creditsChapter.start_time) : (dur > 60 && dur - current <= 30);
-    if (isCreditsTime && !upNextShownRef.current && !dismissedUpNextRef.current) {
+
+    const isCreditsTime = creditsChapter
+      ? position >= creditsChapter.start_time
+      : duration > 60 && duration - position <= 30;
+
+    if (isCreditsTime && duration > 0 && !upNextShownRef.current && !dismissedUpNextRef.current) {
       upNextShownRef.current = true;
       if (onNext) {
         setShowUpNext(true);
@@ -290,62 +264,185 @@ export default function VideoPlayer({
         setShowSuggestions(true);
       }
     }
+  }, [position, duration, introChapter, creditsChapter, introEnd, onNext]);
+
+  // ── Up Next countdown ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!showUpNext || !onNext) return;
+    if (upNextCountdown <= 0) { onNext(); return; }
+    const t = window.setTimeout(() => setUpNextCountdown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [showUpNext, upNextCountdown, onNext]);
+
+  // ── Recommendations ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!showSuggestions || !playingItem?.tmdb_id || !apiKey) return;
+    invoke<TmdbRecommendation[]>("fetch_recommendations", {
+      tmdbId: playingItem.tmdb_id, mediaType: playingItem.media_type, apiKey,
+    }).then(setRecommendations).catch(() => {});
+  }, [showSuggestions, playingItem, apiKey]);
+
+  // ── Controls hide timer ───────────────────────────────────────────────────
+  const resetControlsTimer = useCallback(() => {
+    setShowControls(true);
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 3000);
+  }, []);
+
+  // ── Keyboard shortcuts (stable, use refs — no re-registration on state Δ) ─
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+      switch (e.key) {
+        case " ":
+        case "k": {
+          e.preventDefault();
+          const p = playingRef.current;
+          invoke("mpv_set_paused", { paused: p });
+          setPlaying(!p);
+          setCenterIcon(p ? "▶" : "⏸");
+          break;
+        }
+        case "ArrowLeft": {
+          e.preventDefault();
+          const t = Math.max(0, positionRef.current - 15);
+          invoke("mpv_seek", { position: t });
+          setPosition(t); positionRef.current = t;
+          break;
+        }
+        case "ArrowRight": {
+          e.preventDefault();
+          const t = positionRef.current + 15;
+          invoke("mpv_seek", { position: t });
+          setPosition(t); positionRef.current = t;
+          break;
+        }
+        case "m": {
+          e.preventDefault();
+          const m = mutedRef.current;
+          const v = volumeRef.current;
+          setMuted(!m);
+          invoke("mpv_set_volume", { volume: m ? v : 0 });
+          break;
+        }
+        case "f": {
+          e.preventDefault();
+          invoke("mpv_set_fullscreen", { fullscreen: !mpvFullscreenRef.current });
+          break;
+        }
+        case "n": {
+          if (onNextRef.current) { e.preventDefault(); onNextRef.current(); }
+          break;
+        }
+        case "Escape": {
+          onCloseRef.current();
+          break;
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const flashCenter = (icon: string) => {
+    setCenterIcon(icon);
+    if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
+    centerTimerRef.current = window.setTimeout(() => setCenterIcon(null), 700);
   };
 
+  const togglePlay = useCallback(() => {
+    const pausing = playing;
+    invoke("mpv_set_paused", { paused: pausing });
+    setPlaying(!pausing);
+    flashCenter(pausing ? "▶" : "⏸");
+  }, [playing]);
+
+  const toggleMute = useCallback(() => {
+    if (muted) {
+      const v = prevVolumeRef.current;
+      setMuted(false); setVolume(v);
+      invoke("mpv_set_volume", { volume: v });
+    } else {
+      prevVolumeRef.current = volume;
+      setMuted(true);
+      invoke("mpv_set_volume", { volume: 0 });
+    }
+  }, [muted, volume]);
+
+  const toggleFullscreen = useCallback(() => {
+    invoke("mpv_set_fullscreen", { fullscreen: !mpvFullscreen });
+  }, [mpvFullscreen]);
+
+  const skip = useCallback((amount: number) => {
+    const t = Math.max(0, position + amount);
+    invoke("mpv_seek", { position: t });
+    setPosition(t); positionRef.current = t;
+  }, [position]);
+
   const seekToPosition = (clientX: number) => {
-    if (!progressTrackRef.current) return;
+    if (!progressTrackRef.current || duration <= 0) return;
     const rect = progressTrackRef.current.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const dur = mediaDuration > 0 ? mediaDuration : (videoRef.current?.duration || 0);
-    const newTime = ratio * dur;
-    triggerSeek(newTime);
+    const newTime = ratio * duration;
+    invoke("mpv_seek", { position: newTime });
+    setPosition(newTime); positionRef.current = newTime;
   };
 
   const handleSeekMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     isSeekingRef.current = true;
     seekToPosition(e.clientX);
     const onMove = (ev: MouseEvent) => seekToPosition(ev.clientX);
-    const onUp = () => { isSeekingRef.current = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    const onUp = () => {
+      isSeekingRef.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
-    setVolume(val);
-    if (videoRef.current) { videoRef.current.volume = val; videoRef.current.muted = val === 0; }
-    setMuted(val === 0);
+    if (val > 0) prevVolumeRef.current = val;
+    setVolume(val); setMuted(val === 0);
+    invoke("mpv_set_volume", { volume: val });
   };
 
   const formatTime = (sec: number) => {
     if (!isFinite(sec) || isNaN(sec)) return "0:00";
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
-    if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-    return `${m}:${String(s).padStart(2,"0")}`;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
   };
 
   const VolumeIcon = () => {
     if (muted || volume === 0) return (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
       </svg>
     );
     if (volume < 0.5) return (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/>
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 010 7.07" />
       </svg>
     );
     return (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07"/>
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14" /><path d="M15.54 8.46a5 5 0 010 7.07" />
       </svg>
     );
   };
 
-  const progressPct = duration > 0 ? (progress / duration) * 100 : 0;
-  const timeLeft = duration > 0 ? duration - progress : 0;
+  // ── Derived values ────────────────────────────────────────────────────────
+  const progressPct = duration > 0 ? (position / duration) * 100 : 0;
+  const timeLeft = duration > 0 ? duration - position : 0;
   const isEndscreenActive = showUpNext || showSuggestions;
+  const audioTracks = mpvTracks.filter(t => t.type === "audio");
+  const subtitleTracks = mpvTracks.filter(t => t.type === "sub");
+  const backdropSrc = playingItem?.backdrop_path ? convertFileSrc(playingItem.backdrop_path) : null;
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div
       ref={playerRef}
@@ -356,37 +453,13 @@ export default function VideoPlayer({
         controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 1000);
       }}
     >
-      <video
-        ref={videoRef}
-        className="video-element"
-        src={activeSrc}
-        autoPlay
-        onTimeUpdate={handleTimeUpdate}
+      {/* ── mpv backdrop: replaces <video>, shows artwork while mpv plays in its window ── */}
+      <div
+        className="mpv-backdrop"
+        style={backdropSrc ? { backgroundImage: `url("${backdropSrc}")` } : {}}
         onClick={togglePlay}
         onDoubleClick={toggleFullscreen}
-        onWaiting={() => setIsBuffering(true)}
-        onCanPlay={() => setIsBuffering(false)}
-        onPlaying={() => { setIsBuffering(false); setPlaying(true); }}
-        onPause={() => setPlaying(false)}
-        onError={() => { setHasError(true); setIsBuffering(false); if (onToast) onToast("Unable to play this file. FFmpeg may be required."); }}
-        onLoadedMetadata={() => {
-          if (!videoRef.current) return;
-          setDuration(videoRef.current.duration);
-          if (initialTime && initialTime > 0 && !activeSrc.includes("/stream")) {
-            videoRef.current.currentTime = initialTime;
-          }
-        }}
-        onEnded={() => { if (onNext) onNext(); else { setPlaying(false); if (!suggestionsShownRef.current) { suggestionsShownRef.current = true; setShowSuggestions(true); } } }}
-        crossOrigin="anonymous"
-      >
-        {selectedSubtitle !== null && rawPath && (
-          <track
-            kind="subtitles"
-            src={`http://127.0.0.1:1421/subtitle?path=${encodeURIComponent(rawPath)}&s=${selectedSubtitle}${streamOffset > 0 ? `&start=${streamOffset}` : ''}`}
-            default
-          />
-        )}
-      </video>
+      />
 
       {centerIcon && <div className="vp-center-action">{centerIcon}</div>}
       {isBuffering && !hasError && <div className="vp-buffering"><div className="vp-spinner" /></div>}
@@ -394,26 +467,31 @@ export default function VideoPlayer({
       {hasError && (
         <div className="vp-error">
           <div className="vp-error-icon">⚠</div>
-          <div className="vp-error-msg">Unable to play this file. FFmpeg is required for MKV/AVI/MOV playback.</div>
+          <div className="vp-error-msg">{errorMsg || "mpv failed to start."}</div>
+          <div className="vp-error-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: 8 }}>
+            Install mpv: <code style={{ background: "#111", padding: "2px 6px", borderRadius: 4 }}>sudo apt install mpv</code>
+          </div>
           <button className="vp-error-btn" onClick={onClose}>Close Player</button>
         </div>
       )}
+
       {/* Skip Intro */}
       {showIntroBtn && (
-        <button className="skip-intro-btn" onClick={() => { 
+        <button className="skip-intro-btn" onClick={() => {
           const target = introChapter ? introChapter.end_time : introEnd;
-          triggerSeek(target); 
-          setShowIntroBtn(false); 
+          invoke("mpv_seek", { position: target });
+          setPosition(target);
+          setShowIntroBtn(false);
         }}>
           Skip Intro
         </button>
       )}
 
-      {/* Netflix Autoplay Endscreen */}
+      {/* Endscreen */}
       {isEndscreenActive && (
         <div className="endscreen-container">
           <button className="vp-back-btn" onClick={onClose} style={{ position: "absolute", top: 40, left: 40, zIndex: 100 }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6" /></svg>
           </button>
 
           {showUpNext && onNext && nextTitle && (
@@ -423,7 +501,7 @@ export default function VideoPlayer({
               <div className="endscreen-up-next-desc">The next episode is starting automatically.</div>
               <div className="endscreen-actions">
                 <button className="endscreen-btn endscreen-btn-play" onClick={onNext}>
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
                   Play Next
                 </button>
                 <button className="endscreen-btn endscreen-btn-credits" onClick={() => { setShowUpNext(false); dismissedUpNextRef.current = true; }}>
@@ -450,11 +528,10 @@ export default function VideoPlayer({
                         onShowDetail(fakeItem);
                       }
                     }}>
-                      {rec.poster_url ? (
-                        <img className="suggestion-poster" src={rec.poster_url} alt={rec.title} loading="lazy" />
-                      ) : (
-                        <div className="suggestion-poster-fallback">{rec.title}</div>
-                      )}
+                      {rec.poster_url
+                        ? <img className="suggestion-poster" src={rec.poster_url} alt={rec.title} loading="lazy" />
+                        : <div className="suggestion-poster-fallback">{rec.title}</div>
+                      }
                       <div className="suggestion-info">
                         <div className="suggestion-title">{rec.title}</div>
                         <div className="suggestion-meta">
@@ -473,154 +550,158 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Top and Bottom Bars hidden during endscreen */}
+      {/* Top and Bottom bars (hidden during endscreen) */}
       {!isEndscreenActive && (
         <>
           {/* Top bar */}
           <div className="vp-top-bar">
             <button className="vp-back-btn" onClick={onClose}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6" /></svg>
             </button>
             {title && <div className="vp-title">{title}</div>}
           </div>
 
           {/* Bottom bar */}
           <div className="vp-bottom-bar">
-        <div className="vp-progress-container">
-          <div className="vp-progress-track" ref={progressTrackRef} onMouseDown={handleSeekMouseDown}>
-            <div className="vp-progress-bg" />
-            <div className="vp-progress-fill" style={{ width: `${progressPct}%` }} />
-          </div>
-          <div className="vp-time-display">
-            {formatTime(progress)} / {formatTime(duration)}
-            {timeLeft > 0 && duration > 0 && <span className="vp-time-remaining"> −{formatTime(timeLeft)}</span>}
-          </div>
-        </div>
+            <div className="vp-progress-container">
+              <div className="vp-progress-track" ref={progressTrackRef} onMouseDown={handleSeekMouseDown}>
+                <div className="vp-progress-bg" />
+                <div className="vp-progress-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <div className="vp-time-display">
+                {formatTime(position)} / {formatTime(duration)}
+                {timeLeft > 0 && duration > 0 && <span className="vp-time-remaining"> −{formatTime(timeLeft)}</span>}
+              </div>
+            </div>
 
-        <div className="vp-controls-row">
-          <button className="vp-btn" onClick={togglePlay} title={playing ? "Pause (k)" : "Play (k)"}>
-            {playing
-              ? <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-              : <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            }
-          </button>
+            <div className="vp-controls-row">
+              {/* Play / Pause */}
+              <button className="vp-btn" onClick={togglePlay} title={playing ? "Pause (k)" : "Play (k)"}>
+                {playing
+                  ? <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
+                  : <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                }
+              </button>
 
-          {onNext && (
-            <button className="vp-btn" onClick={onNext} title="Next Episode (n)">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 4 15 12 5 20 5 4"/>
-                <rect x="17" y="4" width="2.5" height="16" rx="1"/>
-              </svg>
-            </button>
-          )}
+              {/* Next episode */}
+              {onNext && (
+                <button className="vp-btn" onClick={onNext} title="Next Episode (n)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="5 4 15 12 5 20 5 4" /><rect x="17" y="4" width="2.5" height="16" rx="1" />
+                  </svg>
+                </button>
+              )}
 
-          <button className="vp-btn" onClick={() => skip(-15)} title="Rewind 15s (←)">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/>
-              <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
-            </svg>
-          </button>
-          <button className="vp-btn" onClick={() => skip(15)} title="Forward 15s (→)">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
-              <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
-            </svg>
-          </button>
-
-          <div className="vp-volume-group">
-            <button className="vp-btn" onClick={toggleMute} title="Mute (m)"><VolumeIcon /></button>
-            <input type="range" min="0" max="1" step="0.02"
-              value={muted ? 0 : volume} onChange={handleVolumeChange} className="vp-volume-slider" />
-          </div>
-
-          <div className="vp-spacer" />
-
-          {streams.length > 0 && (
-            <div className="vp-tracks-container" style={{ position: "relative" }}>
-              <button className="vp-btn" onClick={() => setShowTracks(!showTracks)} title="Audio & Subtitles">
+              {/* Skip -15 */}
+              <button className="vp-btn" onClick={() => skip(-15)} title="Rewind 15s (←)">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+                  <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+                  <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
                 </svg>
               </button>
-              {showTracks && (
-                <div className="vp-tracks-popup">
-                  <div className="vp-tracks-column">
-                    <div className="vp-tracks-header">Audio</div>
-                    {streams.filter(s => s.codec_type === "audio").map((s, i) => {
-                      const currentAudioIdx = src.match(/&a=(\d+)/) ? parseInt(src.match(/&a=(\d+)/)![1]) : streams.find(st => st.codec_type === "audio")?.index;
-                      const isActive = currentAudioIdx === s.index;
-                      return (
-                        <div key={s.index} className={`vp-track-item ${isActive ? "active" : ""}`} onClick={() => {
-                          if (!isActive && onAudioChange) {
-                            if (videoRef.current) isSeekingRef.current = true;
-                            const currentTime = streamOffset + (videoRef.current?.currentTime || 0);
-                            
-                            try {
-                              const url = new URL(activeSrc);
-                              url.searchParams.set("a", s.index.toString());
-                              url.searchParams.set("start", currentTime.toString());
-                              setActiveSrc(url.toString());
-                              setStreamOffset(currentTime);
-                              setIsBuffering(true);
-                            } catch {
-                              onAudioChange(s.index, currentTime);
-                            }
-                            isSeekingRef.current = false;
-                          }
-                          setShowTracks(false);
-                        }}>
-                          {isActive && <span className="vp-track-check">✓</span>}
-                          {getTrackName(s, i, "Audio")}
+
+              {/* Skip +15 */}
+              <button className="vp-btn" onClick={() => skip(15)} title="Forward 15s (→)">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+                  <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
+                </svg>
+              </button>
+
+              {/* Volume */}
+              <div className="vp-volume-group">
+                <button className="vp-btn" onClick={toggleMute} title="Mute (m)"><VolumeIcon /></button>
+                <input type="range" min="0" max="1" step="0.02"
+                  value={muted ? 0 : volume} onChange={handleVolumeChange} className="vp-volume-slider" />
+              </div>
+
+              <div className="vp-spacer" />
+
+              {/* Audio & Subtitle track selector */}
+              {(audioTracks.length > 0 || subtitleTracks.length > 0) && (
+                <div className="vp-tracks-container" style={{ position: "relative" }}>
+                  <button className="vp-btn" onClick={() => setShowTracks(!showTracks)} title="Audio & Subtitles">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                    </svg>
+                  </button>
+                  {showTracks && (
+                    <div className="vp-tracks-popup">
+                      {audioTracks.length > 0 && (
+                        <div className="vp-tracks-column">
+                          <div className="vp-tracks-header">Audio</div>
+                          {audioTracks.map((t, i) => (
+                            <div
+                              key={t.id}
+                              className={`vp-track-item ${currentAudioId === t.id ? "active" : ""}`}
+                              onClick={() => {
+                                invoke("mpv_set_audio_track", { id: t.id });
+                                setCurrentAudioId(t.id);
+                                setShowTracks(false);
+                              }}
+                            >
+                              {currentAudioId === t.id && <span className="vp-track-check">✓</span>}
+                              {getTrackLabel(t, i, "Audio")}
+                            </div>
+                          ))}
                         </div>
-                      );
-                    })}
-                  </div>
-                  <div className="vp-tracks-column">
-                    <div className="vp-tracks-header">Subtitles</div>
-                    <div className={`vp-track-item ${selectedSubtitle === null ? "active" : ""}`} onClick={() => { setSelectedSubtitle(null); setShowTracks(false); }}>
-                      {selectedSubtitle === null && <span className="vp-track-check">✓</span>}
-                      Off
+                      )}
+                      <div className="vp-tracks-column">
+                        <div className="vp-tracks-header">Subtitles</div>
+                        <div
+                          className={`vp-track-item ${currentSubtitleId === null ? "active" : ""}`}
+                          onClick={() => { invoke("mpv_set_subtitle_track", { id: -1 }); setCurrentSubtitleId(null); setShowTracks(false); }}
+                        >
+                          {currentSubtitleId === null && <span className="vp-track-check">✓</span>}
+                          Off
+                        </div>
+                        {subtitleTracks.map((t, i) => (
+                          <div
+                            key={t.id}
+                            className={`vp-track-item ${currentSubtitleId === t.id ? "active" : ""}`}
+                            onClick={() => {
+                              invoke("mpv_set_subtitle_track", { id: t.id });
+                              setCurrentSubtitleId(t.id);
+                              setShowTracks(false);
+                            }}
+                          >
+                            {currentSubtitleId === t.id && <span className="vp-track-check">✓</span>}
+                            {getTrackLabel(t, i, "Subtitle")}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    {streams.filter(s => s.codec_type === "subtitle").map((s, i) => {
-                      const isActive = selectedSubtitle === s.index;
-                      return (
-                        <div key={s.index} className={`vp-track-item ${isActive ? "active" : ""}`} onClick={() => { setSelectedSubtitle(s.index); setShowTracks(false); }}>
-                          {isActive && <span className="vp-track-check">✓</span>}
-                          {getTrackName(s, i, "Subtitle")}
-                        </div>
-                      );
-                    })}
-                  </div>
+                  )}
                 </div>
               )}
+
+              {/* Set Intro button */}
+              <button className="vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(!settingIntro)} title="Set Intro Timestamps">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                </svg>
+              </button>
+
+              {/* Fullscreen (controls mpv's window) */}
+              <button className="vp-btn" onClick={toggleFullscreen} title="Toggle mpv Fullscreen (f)">
+                {mpvFullscreen
+                  ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3" /></svg>
+                  : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
+                }
+              </button>
             </div>
-          )}
 
-          <button className="vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(!settingIntro)} title="Set Intro Timestamps">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
-            </svg>
-          </button>
-
-          <button className="vp-btn" onClick={toggleFullscreen} title="Fullscreen (f)">
-            {document.fullscreenElement
-              ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/></svg>
-              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
-            }
-          </button>
-        </div>
-
-        {settingIntro && (
-          <div className="vp-intro-setter">
-            <span className="vp-intro-setter-label">Intro end: {introEnd > 0 ? formatTime(introEnd) : "not set"}</span>
-            <button className="vp-intro-setter-btn" onClick={() => { if (videoRef.current) setIntroEnd(videoRef.current.currentTime); }}>
-              Mark Current as Intro End
-            </button>
-            <button className="vp-intro-setter-btn" onClick={() => { setIntroEnd(0); setSettingIntro(false); }}>Clear</button>
+            {settingIntro && (
+              <div className="vp-intro-setter">
+                <span className="vp-intro-setter-label">Intro end: {introEnd > 0 ? formatTime(introEnd) : "not set"}</span>
+                <button className="vp-intro-setter-btn" onClick={() => setIntroEnd(position)}>
+                  Mark Current as Intro End
+                </button>
+                <button className="vp-intro-setter-btn" onClick={() => { setIntroEnd(0); setSettingIntro(false); }}>Clear</button>
+              </div>
+            )}
           </div>
-        )}
-      </div>
-      </>
+        </>
       )}
     </div>
   );

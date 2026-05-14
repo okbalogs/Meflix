@@ -690,6 +690,15 @@ html, body {
   cursor: pointer;
 }
 
+/* mpv backdrop — shown in the Tauri control-panel window while mpv renders video */
+.mpv-backdrop {
+  position: absolute; inset: 0;
+  background: #000 center/cover no-repeat;
+  cursor: pointer;
+  filter: brightness(0.35) blur(2px);
+  transform: scale(1.04); /* hide blur edge */
+}
+
 /* Top/bottom fade */
 .vp-top-bar, .vp-bottom-bar {
   position: absolute; left: 0; right: 0;
@@ -834,7 +843,8 @@ html, body {
   background: linear-gradient(135deg, #111, #222);
 }
 
-.vp-endscreen-active .video-element {
+.vp-endscreen-active .video-element,
+.vp-endscreen-active .mpv-backdrop {
   transform: scale(0.3) translate(5%, 5%);
   transform-origin: top left;
   border-radius: 12px;
