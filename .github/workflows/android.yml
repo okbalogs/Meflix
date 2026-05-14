@@ -23,18 +23,18 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform and build tools
+      - name: Accept Android SDK licenses and install required packages
         run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "platform-tools"
 
       - name: Build debug APK
         working-directory: android
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
