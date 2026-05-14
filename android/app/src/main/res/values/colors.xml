@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="meflix_icon_background">#E50914</color>
+    <color name="meflix_icon_foreground">#FFFFFFFF</color>
+</resources>
