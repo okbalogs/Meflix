@@ -31,11 +31,31 @@ jobs:
             "build-tools;34.0.0" \
             "platform-tools"
 
+      - name: Verify Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms/android-34/android.jar" && echo "android-34 OK" || echo "android-34 MISSING"
+          ls "$ANDROID_HOME/build-tools/34.0.0/aapt" && echo "build-tools OK" || echo "build-tools MISSING"
+
       - name: Build debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew assembleDebug --stacktrace 2>&1 | tee /tmp/gradle-build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          exit $BUILD_STATUS
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "=== Kotlin compiler errors ==="
+          grep -E "^e: |^w: " /tmp/gradle-build.log | head -50 || true
+          echo "=== Gradle failure details ==="
+          grep -A 20 "FAILURE: Build failed" /tmp/gradle-build.log | head -40 || true
+          echo "=== Failed tasks ==="
+          grep " FAILED" /tmp/gradle-build.log | head -10 || true
+          echo "=== Last 80 lines ==="
+          tail -80 /tmp/gradle-build.log || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

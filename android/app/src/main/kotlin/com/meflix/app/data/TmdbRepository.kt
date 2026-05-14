@@ -76,14 +76,14 @@ class TmdbRepository(private val context: Context) {
                 api.getMovieGenres(apiKey).body()?.genres?.forEach { g ->
                     movieGenreMap[g.id] = g.name
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { /* ignore network errors */ }
         }
         if (tvGenreMap.isEmpty()) {
             try {
                 api.getTvGenres(apiKey).body()?.genres?.forEach { g ->
                     tvGenreMap[g.id] = g.name
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { /* ignore network errors */ }
         }
     }
 
