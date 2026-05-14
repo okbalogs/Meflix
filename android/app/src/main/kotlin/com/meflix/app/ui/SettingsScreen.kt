@@ -59,6 +59,7 @@ fun SettingsScreen(
 
     Scaffold(
         containerColor = NetflixBlack,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             TopAppBar(
                 title = {
@@ -73,15 +74,20 @@ fun SettingsScreen(
             )
         }
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(NetflixBlack)
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
+                .navigationBarsPadding()
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp)
+            ) {
             // TMDB API Key section
             SettingsSection(title = "TMDB API Key") {
                 Text(
@@ -236,6 +242,7 @@ fun SettingsScreen(
                 }
             }
         }
+        } // outer Box
     }
 }
 

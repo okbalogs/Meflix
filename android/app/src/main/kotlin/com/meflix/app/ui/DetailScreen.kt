@@ -43,6 +43,7 @@ fun DetailScreen(
 
     Scaffold(
         containerColor = NetflixBlack,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             DetailTopBar(onBack = onBack)
         }
@@ -52,6 +53,7 @@ fun DetailScreen(
                 .fillMaxSize()
                 .background(NetflixBlack)
                 .padding(padding)
+                .navigationBarsPadding()
         ) {
             // Backdrop hero
             item {

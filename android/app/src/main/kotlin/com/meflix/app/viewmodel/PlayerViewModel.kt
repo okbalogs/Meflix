@@ -160,7 +160,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val override = TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
-            .setOverrideForType(override)
+            .addOverride(override)
             .build()
         updateTracks()
     }
@@ -171,7 +171,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val override = TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
-            .setOverrideForType(override)
+            .addOverride(override)
             .build()
         updateTracks()
     }

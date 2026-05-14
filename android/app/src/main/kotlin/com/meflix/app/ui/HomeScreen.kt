@@ -69,6 +69,7 @@ fun HomeScreen(
 
     Scaffold(
         containerColor = NetflixBlack,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             HomeTopBar(
                 isSearchActive = isSearchActive,
@@ -89,6 +90,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .background(NetflixBlack)
                 .padding(padding)
+                .navigationBarsPadding()
         ) {
             when {
                 !hasPermission -> {
