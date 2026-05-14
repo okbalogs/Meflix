@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { MediaItem, AppSettings } from "./types";
-import { toPlaySrc, buildSeriesQueue } from "./utils";
+import { buildSeriesQueue } from "./utils";
 import { loadAllProgress, type ProgressStore } from "./progressStore";
 import { loadMyList, toggleMyList } from "./myList";
 import { loadFirstSeen, trackNewItems, type FirstSeenStore } from "./recentlyAdded";
@@ -116,7 +116,8 @@ export default function App() {
   }, []);
 
   // Internal: actually start playback (no resume check)
-  // mpv receives the raw file path directly — no URL routing needed
+  // VideoPlayer owns URL routing (via toPlaySrc inside the component).
+  // App.tsx only needs to pass raw file paths.
   const startPlayItem = useCallback(async (item: MediaItem, startPath?: string, resumeAt?: number) => {
     setPlayingItem(item);
     setPlayingInitialTime(resumeAt || 0);
@@ -399,7 +400,11 @@ export default function App() {
           nextTitle={playingQueue[playingQueueIdx + 1]?.title}
           playingItem={playingItem}
           apiKey={settings.tmdb_api_key}
-          onShowDetail={(item) => { closePlayer(); setDetailItem(item); setSelectedSeason(item.seasons[0]?.number || 1); }}
+          onShowDetail={(item) => {
+            closePlayer();
+            setDetailItem(item);
+            setSelectedSeason(item.seasons[0]?.number || 1);
+          }}
           onToast={showToast}
         />
       )}

@@ -1,35 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import type { MediaItem, TmdbRecommendation, MediaInfo, MediaChapter, MpvTrack } from "../types";
+import type { MediaItem, TmdbRecommendation, MediaInfo, MediaChapter } from "../types";
+import { toPlaySrc } from "../utils";
 import { saveWatchRecord } from "../progressStore";
-
-const getTrackLabel = (track: MpvTrack, fallbackIndex: number, type: "Audio" | "Subtitle"): string => {
-  let name: string;
-  try {
-    name =
-      track.lang && track.lang !== "und"
-        ? new Intl.DisplayNames(["en"], { type: "language" }).of(track.lang) || track.lang.toUpperCase()
-        : `${type} Track ${fallbackIndex + 1}`;
-  } catch {
-    name = `${type} Track ${fallbackIndex + 1}`;
-  }
-  if (track.title && track.title.length < 30 && !track.title.match(/http|\.com|\.cc|\.net/i)) {
-    name += ` - ${track.title}`;
-  } else if (track.codec) {
-    const codecMap: Record<string, string> = {
-      subrip: "SRT", aac: "AAC", ac3: "AC3", eac3: "E-AC3",
-      dts: "DTS", truehd: "TrueHD", flac: "FLAC", ass: "ASS",
-      hdmv_pgs_subtitle: "PGS", hdmv_pgs: "PGS", opus: "Opus", vorbis: "Vorbis",
-    };
-    name += ` [${codecMap[track.codec] || track.codec.toUpperCase()}]`;
-  }
-  return name;
-};
+import {
+  MediaController,
+  MediaControlBar,
+  MediaPlayButton,
+  MediaSeekBackwardButton,
+  MediaSeekForwardButton,
+  MediaMuteButton,
+  MediaVolumeRange,
+  MediaTimeRange,
+  MediaTimeDisplay,
+  MediaFullscreenButton,
+  MediaLoadingIndicator,
+} from "media-chrome/react";
 
 interface VideoPlayerProps {
-  src: string;           // kept for interface compat — mpv uses rawPath instead
+  src: string;
   rawPath: string;
   title: string;
   initialTime?: number;
@@ -40,28 +29,23 @@ interface VideoPlayerProps {
   apiKey?: string | null;
   onShowDetail?: (item: MediaItem) => void;
   onToast?: (msg: string) => void;
-  onAudioChange?: (audioIdx: number, start?: number) => void; // kept for compat, not called
+  onAudioChange?: (audioIdx: number, start?: number) => void;
 }
 
 export default function VideoPlayer({
   rawPath, title, initialTime, onClose, onNext, nextTitle,
   playingItem, apiKey, onShowDetail, onToast,
 }: VideoPlayerProps) {
-  // ── mpv-driven state ─────────────────────────────────────────────────────
-  const [playing, setPlaying] = useState(true);
+  // ── Core state ───────────────────────────────────────────────────────────
+  const [activeSrc, setActiveSrc] = useState<string | null>(null);
+  const [mediaInfo, setMediaInfo] = useState<MediaInfo | null>(null);
+  const [audioIdx, setAudioIdx] = useState(0);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
-  const [isBuffering, setIsBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
-  const [mpvFullscreen, setMpvFullscreen] = useState(false);
-  const [mpvTracks, setMpvTracks] = useState<MpvTrack[]>([]);
-  const [currentAudioId, setCurrentAudioId] = useState<number | null>(null);
-  const [currentSubtitleId, setCurrentSubtitleId] = useState<number | null>(null);
 
-  // ── UI state (unchanged from HTML5 version) ───────────────────────────────
+  // ── UI state ─────────────────────────────────────────────────────────────
   const [showControls, setShowControls] = useState(true);
   const [centerIcon, setCenterIcon] = useState<string | null>(null);
   const [showUpNext, setShowUpNext] = useState(false);
@@ -75,46 +59,35 @@ export default function VideoPlayer({
   const [creditsChapter, setCreditsChapter] = useState<MediaChapter | null>(null);
   const [showTracks, setShowTracks] = useState(false);
 
-  // ── Refs ──────────────────────────────────────────────────────────────────
-  const playerRef = useRef<HTMLDivElement>(null);
-  const progressTrackRef = useRef<HTMLDivElement>(null);
+  // ── Refs ─────────────────────────────────────────────────────────────────
+  const videoRef = useRef<HTMLVideoElement>(null);
   const controlsTimerRef = useRef<number | null>(null);
   const centerTimerRef = useRef<number | null>(null);
   const upNextShownRef = useRef(false);
   const dismissedUpNextRef = useRef(false);
   const suggestionsShownRef = useRef(false);
-  const isSeekingRef = useRef(false);
-  const prevVolumeRef = useRef(1);
+  const seekAfterLoadRef = useRef<number | null>(null);
 
-  // Stable refs — let zero-dep effects and keyboard handler read current values
+  // Stable refs so zero-dep effects read current values without re-registering
   const rawPathRef = useRef(rawPath);
-  const positionRef = useRef(0);
-  const durationRef = useRef(0);
-  const playingRef = useRef(true);
-  const mutedRef = useRef(false);
-  const volumeRef = useRef(1);
-  const mpvFullscreenRef = useRef(false);
   const onNextRef = useRef(onNext);
   const onCloseRef = useRef(onClose);
   const initialTimeRef = useRef(initialTime || 0);
 
   useEffect(() => { rawPathRef.current = rawPath; }, [rawPath]);
-  useEffect(() => { positionRef.current = position; }, [position]);
-  useEffect(() => { durationRef.current = duration; }, [duration]);
-  useEffect(() => { playingRef.current = playing; }, [playing]);
-  useEffect(() => { mutedRef.current = muted; }, [muted]);
-  useEffect(() => { volumeRef.current = volume; }, [volume]);
-  useEffect(() => { mpvFullscreenRef.current = mpvFullscreen; }, [mpvFullscreen]);
   useEffect(() => { onNextRef.current = onNext; }, [onNext]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { initialTimeRef.current = initialTime || 0; }, [initialTime]);
 
-  // ── Progress saving (uses refs — no stale closures) ───────────────────────
+  // ── Progress saving ───────────────────────────────────────────────────────
   const saveCurrentProgress = useCallback(() => {
-    const pos = positionRef.current;
-    const dur = durationRef.current;
-    if (dur > 0 && pos > 2) {
-      saveWatchRecord(rawPathRef.current, { progress: pos, duration: dur, updatedAt: Date.now() });
+    const vid = videoRef.current;
+    if (vid && vid.duration > 0 && vid.currentTime > 2) {
+      saveWatchRecord(rawPathRef.current, {
+        progress: vid.currentTime,
+        duration: vid.duration,
+        updatedAt: Date.now(),
+      });
     }
   }, []);
 
@@ -122,18 +95,26 @@ export default function VideoPlayer({
     const id = window.setInterval(saveCurrentProgress, 5000);
     return () => clearInterval(id);
   }, [saveCurrentProgress]);
-
   useEffect(() => () => { saveCurrentProgress(); }, [saveCurrentProgress]);
 
-  // ── Open mpv whenever rawPath changes (including initial mount) ───────────
+  // ── Build activeSrc when rawPath changes ──────────────────────────────────
   useEffect(() => {
-    // Reset everything for the new file
-    setPosition(0); positionRef.current = 0;
-    setDuration(0); durationRef.current = 0;
-    setMpvTracks([]); setCurrentAudioId(null); setCurrentSubtitleId(null);
-    setPlaying(true); setIsBuffering(true); setHasError(false); setErrorMsg("");
-    setShowUpNext(false); setUpNextCountdown(10); setShowIntroBtn(false);
-    setShowSuggestions(false); setRecommendations([]); setShowTracks(false);
+    let cancelled = false;
+
+    // Reset state for the new file
+    setActiveSrc(null);
+    setHasError(false);
+    setErrorMsg("");
+    setPosition(0);
+    setDuration(0);
+    setAudioIdx(0);
+    setMediaInfo(null);
+    setShowUpNext(false);
+    setUpNextCountdown(10);
+    setShowIntroBtn(false);
+    setShowSuggestions(false);
+    setRecommendations([]);
+    setShowTracks(false);
     upNextShownRef.current = false;
     dismissedUpNextRef.current = false;
     suggestionsShownRef.current = false;
@@ -141,90 +122,35 @@ export default function VideoPlayer({
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 3500);
 
-    const startSec = initialTimeRef.current;
-    invoke<void>("mpv_open", {
-      path: rawPath,
-      start: startSec > 0.5 ? startSec : null,
-      sid: -1, // subtitles off by default; user selects via track panel
-    }).catch((e: unknown) => {
-      const msg = String(e);
-      setHasError(true);
-      setErrorMsg(msg.includes("mpv") ? msg : "Failed to start mpv. Install it with: sudo apt install mpv");
-      setIsBuffering(false);
-      if (onToast) onToast("mpv not found — install mpv to play media.");
+    toPlaySrc(rawPath, null, null).then(src => {
+      if (!cancelled) setActiveSrc(src);
     });
+    return () => { cancelled = true; };
   }, [rawPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Stop mpv when the player is closed ───────────────────────────────────
-  useEffect(() => {
-    return () => {
-      invoke("mpv_stop").catch(() => {});
-      if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
-      if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
-    };
+  // ── Audio track switch — rebuild src and seek to saved position ───────────
+  const handleAudioChange = useCallback(async (idx: number) => {
+    const savedTime = videoRef.current?.currentTime || 0;
+    seekAfterLoadRef.current = savedTime;
+    setAudioIdx(idx);
+    const src = await toPlaySrc(rawPath, idx === 0 ? null : idx, null);
+    setActiveSrc(src);
+    setShowTracks(false);
+  }, [rawPath]);
+
+  // ── Subtitle track handler (external .srt or subtitle endpoint) ───────────
+  const [activeSubIdx, setActiveSubIdx] = useState<number | null>(null);
+  const handleSubtitleChange = useCallback((idx: number | null) => {
+    setActiveSubIdx(idx);
+    setShowTracks(false);
   }, []);
 
-  // ── mpv IPC event subscriptions (registered once, use refs for callbacks) ─
-  useEffect(() => {
-    const unlisteners: Array<() => void> = [];
-
-    listen<number>("mpv://position", ({ payload }) => {
-      positionRef.current = payload;
-      if (!isSeekingRef.current) setPosition(payload);
-      setIsBuffering(false);
-    }).then(fn => unlisteners.push(fn));
-
-    listen<number>("mpv://duration", ({ payload }) => {
-      durationRef.current = payload;
-      setDuration(payload);
-    }).then(fn => unlisteners.push(fn));
-
-    listen<boolean>("mpv://paused", ({ payload }) => {
-      setPlaying(!payload);
-    }).then(fn => unlisteners.push(fn));
-
-    listen<null>("mpv://ended", () => {
-      saveCurrentProgress();
-      if (onNextRef.current) {
-        onNextRef.current();
-      } else if (!suggestionsShownRef.current) {
-        suggestionsShownRef.current = true;
-        setShowSuggestions(true);
-      }
-    }).then(fn => unlisteners.push(fn));
-
-    listen<boolean>("mpv://buffering", ({ payload }) => {
-      if (payload) setIsBuffering(true);
-    }).then(fn => unlisteners.push(fn));
-
-    listen<MpvTrack[]>("mpv://track-list", ({ payload }) => {
-      if (!Array.isArray(payload)) return;
-      setMpvTracks(payload);
-      const audioSel = payload.find(t => t.type === "audio" && t.selected);
-      if (audioSel) setCurrentAudioId(audioSel.id);
-      const subSel = payload.find(t => t.type === "sub" && t.selected);
-      setCurrentSubtitleId(subSel?.id ?? null);
-    }).then(fn => unlisteners.push(fn));
-
-    listen<boolean>("mpv://fullscreen", ({ payload }) => {
-      setMpvFullscreen(payload);
-      mpvFullscreenRef.current = payload;
-    }).then(fn => unlisteners.push(fn));
-
-    listen<number>("mpv://volume", ({ payload }) => {
-      setVolume(payload);
-      volumeRef.current = payload;
-      setMuted(payload === 0);
-    }).then(fn => unlisteners.push(fn));
-
-    return () => unlisteners.forEach(fn => fn());
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Chapters via ffprobe (FFmpeg utilities preserved) ─────────────────────
+  // ── Chapters via ffprobe ──────────────────────────────────────────────────
   useEffect(() => {
     if (!rawPath) return;
     invoke<MediaInfo>("get_media_info", { path: rawPath })
       .then(info => {
+        setMediaInfo(info);
         let intro = info.chapters.find(c => c.title && /^(intro|opening|op\b)/i.test(c.title));
         let credits = info.chapters.find(c => c.title && /^(credits|ending|ed\b|outro)/i.test(c.title));
         if (info.chapters.length > 1) {
@@ -239,6 +165,39 @@ export default function VideoPlayer({
       })
       .catch(() => {});
   }, [rawPath]);
+
+  // ── Video element event handlers ──────────────────────────────────────────
+  const handleLoadedMetadata = useCallback(() => {
+    const vid = videoRef.current;
+    if (!vid) return;
+    setDuration(vid.duration);
+    const startAt = seekAfterLoadRef.current ?? initialTimeRef.current;
+    if (startAt > 0.5) vid.currentTime = startAt;
+    seekAfterLoadRef.current = null;
+  }, []);
+
+  const handleTimeUpdate = useCallback(() => {
+    const vid = videoRef.current;
+    if (vid) setPosition(vid.currentTime);
+  }, []);
+
+  const handleEnded = useCallback(() => {
+    saveCurrentProgress();
+    if (onNextRef.current) {
+      onNextRef.current();
+    } else if (!suggestionsShownRef.current) {
+      suggestionsShownRef.current = true;
+      setShowSuggestions(true);
+    }
+  }, [saveCurrentProgress]);
+
+  const handleVideoError = useCallback(() => {
+    const vid = videoRef.current;
+    const msg = vid?.error?.message || "Failed to load video.";
+    setHasError(true);
+    setErrorMsg(msg);
+    if (onToast) onToast("Video failed to load — check the file path or FFmpeg.");
+  }, [onToast]);
 
   // ── Skip Intro / Up Next driven by position ───────────────────────────────
   useEffect(() => {
@@ -282,62 +241,55 @@ export default function VideoPlayer({
     }).then(setRecommendations).catch(() => {});
   }, [showSuggestions, playingItem, apiKey]);
 
-  // ── Controls hide timer ───────────────────────────────────────────────────
+  // ── Controls autohide ─────────────────────────────────────────────────────
   const resetControlsTimer = useCallback(() => {
     setShowControls(true);
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 3000);
   }, []);
 
-  // ── Keyboard shortcuts (stable, use refs — no re-registration on state Δ) ─
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+      const vid = videoRef.current;
+      if (!vid) return;
       switch (e.key) {
         case " ":
-        case "k": {
+        case "k":
           e.preventDefault();
-          const p = playingRef.current;
-          invoke("mpv_set_paused", { paused: p });
-          setPlaying(!p);
-          setCenterIcon(p ? "▶" : "⏸");
+          if (vid.paused) vid.play();
+          else vid.pause();
           break;
-        }
-        case "ArrowLeft": {
+        case "ArrowLeft":
           e.preventDefault();
-          const t = Math.max(0, positionRef.current - 15);
-          invoke("mpv_seek", { position: t });
-          setPosition(t); positionRef.current = t;
+          vid.currentTime = Math.max(0, vid.currentTime - 15);
+          setCenterIcon("⏪");
+          if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
+          centerTimerRef.current = window.setTimeout(() => setCenterIcon(null), 700);
           break;
-        }
-        case "ArrowRight": {
+        case "ArrowRight":
           e.preventDefault();
-          const t = positionRef.current + 15;
-          invoke("mpv_seek", { position: t });
-          setPosition(t); positionRef.current = t;
+          vid.currentTime += 15;
+          setCenterIcon("⏩");
+          if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
+          centerTimerRef.current = window.setTimeout(() => setCenterIcon(null), 700);
           break;
-        }
-        case "m": {
+        case "m":
           e.preventDefault();
-          const m = mutedRef.current;
-          const v = volumeRef.current;
-          setMuted(!m);
-          invoke("mpv_set_volume", { volume: m ? v : 0 });
+          vid.muted = !vid.muted;
           break;
-        }
-        case "f": {
+        case "f":
           e.preventDefault();
-          invoke("mpv_set_fullscreen", { fullscreen: !mpvFullscreenRef.current });
+          if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+          else document.exitFullscreen?.();
           break;
-        }
-        case "n": {
+        case "n":
           if (onNextRef.current) { e.preventDefault(); onNextRef.current(); }
           break;
-        }
-        case "Escape": {
+        case "Escape":
           onCloseRef.current();
           break;
-        }
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -345,69 +297,10 @@ export default function VideoPlayer({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Helpers ───────────────────────────────────────────────────────────────
-  const flashCenter = (icon: string) => {
-    setCenterIcon(icon);
-    if (centerTimerRef.current) clearTimeout(centerTimerRef.current);
-    centerTimerRef.current = window.setTimeout(() => setCenterIcon(null), 700);
-  };
-
-  const togglePlay = useCallback(() => {
-    const pausing = playing;
-    invoke("mpv_set_paused", { paused: pausing });
-    setPlaying(!pausing);
-    flashCenter(pausing ? "▶" : "⏸");
-  }, [playing]);
-
-  const toggleMute = useCallback(() => {
-    if (muted) {
-      const v = prevVolumeRef.current;
-      setMuted(false); setVolume(v);
-      invoke("mpv_set_volume", { volume: v });
-    } else {
-      prevVolumeRef.current = volume;
-      setMuted(true);
-      invoke("mpv_set_volume", { volume: 0 });
-    }
-  }, [muted, volume]);
-
-  const toggleFullscreen = useCallback(() => {
-    invoke("mpv_set_fullscreen", { fullscreen: !mpvFullscreen });
-  }, [mpvFullscreen]);
-
-  const skip = useCallback((amount: number) => {
-    const t = Math.max(0, position + amount);
-    invoke("mpv_seek", { position: t });
-    setPosition(t); positionRef.current = t;
-  }, [position]);
-
-  const seekToPosition = (clientX: number) => {
-    if (!progressTrackRef.current || duration <= 0) return;
-    const rect = progressTrackRef.current.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const newTime = ratio * duration;
-    invoke("mpv_seek", { position: newTime });
-    setPosition(newTime); positionRef.current = newTime;
-  };
-
-  const handleSeekMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    isSeekingRef.current = true;
-    seekToPosition(e.clientX);
-    const onMove = (ev: MouseEvent) => seekToPosition(ev.clientX);
-    const onUp = () => {
-      isSeekingRef.current = false;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Number(e.target.value);
-    if (val > 0) prevVolumeRef.current = val;
-    setVolume(val); setMuted(val === 0);
-    invoke("mpv_set_volume", { volume: val });
-  };
+  const isEndscreenActive = showUpNext || showSuggestions;
+  const audioStreams = mediaInfo?.streams.filter(s => s.codec_type === "audio") ?? [];
+  const subtitleStreams = mediaInfo?.streams.filter(s => s.codec_type === "subtitle") ?? [];
+  const timeLeft = duration > 0 ? duration - position : 0;
 
   const formatTime = (sec: number) => {
     if (!isFinite(sec) || isNaN(sec)) return "0:00";
@@ -416,82 +309,87 @@ export default function VideoPlayer({
     return `${m}:${String(s).padStart(2, "0")}`;
   };
 
-  const VolumeIcon = () => {
-    if (muted || volume === 0) return (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
-      </svg>
-    );
-    if (volume < 0.5) return (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 010 7.07" />
-      </svg>
-    );
-    return (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14" /><path d="M15.54 8.46a5 5 0 010 7.07" />
-      </svg>
-    );
+  const getStreamLabel = (s: typeof audioStreams[number], idx: number, type: string) => {
+    const lang = s.language && s.language !== "und"
+      ? (new Intl.DisplayNames(["en"], { type: "language" }).of(s.language) || s.language.toUpperCase())
+      : `${type} ${idx + 1}`;
+    return s.title ? `${lang} — ${s.title}` : lang;
   };
-
-  // ── Derived values ────────────────────────────────────────────────────────
-  const progressPct = duration > 0 ? (position / duration) * 100 : 0;
-  const timeLeft = duration > 0 ? duration - position : 0;
-  const isEndscreenActive = showUpNext || showSuggestions;
-  const audioTracks = mpvTracks.filter(t => t.type === "audio");
-  const subtitleTracks = mpvTracks.filter(t => t.type === "sub");
-  const backdropSrc = playingItem?.backdrop_path ? convertFileSrc(playingItem.backdrop_path) : null;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      ref={playerRef}
-      className={`video-player-overlay ${showControls && !isEndscreenActive ? "controls-active" : "controls-hidden"} ${isEndscreenActive ? "vp-endscreen-active" : ""}`}
+    <MediaController
+      className={`video-player-overlay mc-player ${showControls && !isEndscreenActive ? "controls-active" : "controls-hidden"} ${isEndscreenActive ? "vp-endscreen-active" : ""}`}
+      autohide="-1"
+      gestures-disabled=""
       onMouseMove={resetControlsTimer}
       onMouseLeave={() => {
         if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
         controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 1000);
       }}
     >
-      {/* ── mpv backdrop: replaces <video>, shows artwork while mpv plays in its window ── */}
-      <div
-        className="mpv-backdrop"
-        style={backdropSrc ? { backgroundImage: `url("${backdropSrc}")` } : {}}
-        onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
-      />
+      {/* ── Actual video element (rendered inside MC shadow DOM) ── */}
+      <video
+        ref={videoRef}
+        slot="media"
+        src={activeSrc || undefined}
+        playsInline
+        crossOrigin="anonymous"
+        onLoadedMetadata={handleLoadedMetadata}
+        onTimeUpdate={handleTimeUpdate}
+        onEnded={handleEnded}
+        onError={handleVideoError}
+      >
+        {/* Subtitle track via the FFmpeg subtitle endpoint */}
+        {activeSubIdx !== null && (
+          <track
+            key={activeSubIdx}
+            kind="subtitles"
+            src={`http://127.0.0.1:1421/subtitle?path=${encodeURIComponent(rawPath)}&s=${activeSubIdx}`}
+            default
+          />
+        )}
+      </video>
 
-      {centerIcon && <div className="vp-center-action">{centerIcon}</div>}
-      {isBuffering && !hasError && <div className="vp-buffering"><div className="vp-spinner" /></div>}
+      {/* ── Media Chrome loading indicator (built-in) ── */}
+      <MediaLoadingIndicator slot="centered-chrome" className="mc-loading-indicator" />
 
+      {/* ── Center flash icon ── */}
+      {centerIcon && (
+        <div className="vp-center-action" slot="centered-chrome">{centerIcon}</div>
+      )}
+
+      {/* ── Error overlay ── */}
       {hasError && (
         <div className="vp-error">
           <div className="vp-error-icon">⚠</div>
-          <div className="vp-error-msg">{errorMsg || "mpv failed to start."}</div>
-          <div className="vp-error-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: 8 }}>
-            Install mpv: <code style={{ background: "#111", padding: "2px 6px", borderRadius: 4 }}>sudo apt install mpv</code>
+          <div className="vp-error-msg">{errorMsg || "Video failed to load."}</div>
+          <div className="vp-error-hint">
+            Make sure FFmpeg is installed: <code>sudo apt install ffmpeg</code>
           </div>
           <button className="vp-error-btn" onClick={onClose}>Close Player</button>
         </div>
       )}
 
-      {/* Skip Intro */}
+      {/* ── Skip Intro button ── */}
       {showIntroBtn && (
         <button className="skip-intro-btn" onClick={() => {
           const target = introChapter ? introChapter.end_time : introEnd;
-          invoke("mpv_seek", { position: target });
-          setPosition(target);
+          if (videoRef.current) videoRef.current.currentTime = target;
           setShowIntroBtn(false);
         }}>
           Skip Intro
         </button>
       )}
 
-      {/* Endscreen */}
+      {/* ── Endscreen ── */}
       {isEndscreenActive && (
         <div className="endscreen-container">
-          <button className="vp-back-btn" onClick={onClose} style={{ position: "absolute", top: 40, left: 40, zIndex: 100 }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6" /></svg>
+          <button className="vp-back-btn" onClick={onClose}
+            style={{ position: "absolute", top: 40, left: 40, zIndex: 100 }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
           </button>
 
           {showUpNext && onNext && nextTitle && (
@@ -501,10 +399,13 @@ export default function VideoPlayer({
               <div className="endscreen-up-next-desc">The next episode is starting automatically.</div>
               <div className="endscreen-actions">
                 <button className="endscreen-btn endscreen-btn-play" onClick={onNext}>
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
                   Play Next
                 </button>
-                <button className="endscreen-btn endscreen-btn-credits" onClick={() => { setShowUpNext(false); dismissedUpNextRef.current = true; }}>
+                <button className="endscreen-btn endscreen-btn-credits"
+                  onClick={() => { setShowUpNext(false); dismissedUpNextRef.current = true; }}>
                   Watch Credits
                 </button>
               </div>
@@ -543,166 +444,133 @@ export default function VideoPlayer({
                   ))}
                 </div>
               ) : (
-                <div style={{ color: "var(--text-muted)", fontSize: "1.2rem" }}>Loading recommendations...</div>
+                <div style={{ color: "var(--text-muted)", fontSize: "1.2rem" }}>
+                  Loading recommendations...
+                </div>
               )}
             </div>
           )}
         </div>
       )}
 
-      {/* Top and Bottom bars (hidden during endscreen) */}
+      {/* ── Top bar ── */}
       {!isEndscreenActive && (
-        <>
-          {/* Top bar */}
-          <div className="vp-top-bar">
-            <button className="vp-back-btn" onClick={onClose}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6" /></svg>
+        <div slot="top-chrome" className="vp-top-bar">
+          <button className="vp-back-btn" onClick={onClose}>
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+          {title && <div className="vp-title">{title}</div>}
+          {timeLeft > 0 && duration > 0 && (
+            <div className="vp-time-remaining-top">−{formatTime(timeLeft)}</div>
+          )}
+        </div>
+      )}
+
+      {/* ── Bottom Media Chrome control bar ── */}
+      {!isEndscreenActive && (
+        <MediaControlBar className="mc-control-bar">
+          <MediaPlayButton className="mc-btn" />
+
+          {onNext && (
+            <button className="mc-btn mc-next-btn vp-btn" onClick={onNext} title="Next Episode (n)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 4 15 12 5 20 5 4" />
+                <rect x="17" y="4" width="2.5" height="16" rx="1" />
+              </svg>
             </button>
-            {title && <div className="vp-title">{title}</div>}
-          </div>
+          )}
 
-          {/* Bottom bar */}
-          <div className="vp-bottom-bar">
-            <div className="vp-progress-container">
-              <div className="vp-progress-track" ref={progressTrackRef} onMouseDown={handleSeekMouseDown}>
-                <div className="vp-progress-bg" />
-                <div className="vp-progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <div className="vp-time-display">
-                {formatTime(position)} / {formatTime(duration)}
-                {timeLeft > 0 && duration > 0 && <span className="vp-time-remaining"> −{formatTime(timeLeft)}</span>}
-              </div>
-            </div>
+          <MediaSeekBackwardButton className="mc-btn" seekOffset={15} />
+          <MediaSeekForwardButton className="mc-btn" seekOffset={15} />
 
-            <div className="vp-controls-row">
-              {/* Play / Pause */}
-              <button className="vp-btn" onClick={togglePlay} title={playing ? "Pause (k)" : "Play (k)"}>
-                {playing
-                  ? <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
-                  : <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                }
-              </button>
+          <MediaMuteButton className="mc-btn" />
+          <MediaVolumeRange className="mc-volume" />
 
-              {/* Next episode */}
-              {onNext && (
-                <button className="vp-btn" onClick={onNext} title="Next Episode (n)">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                    <polygon points="5 4 15 12 5 20 5 4" /><rect x="17" y="4" width="2.5" height="16" rx="1" />
-                  </svg>
-                </button>
-              )}
+          <MediaTimeDisplay className="mc-time" />
+          <MediaTimeRange className="mc-time-range" />
 
-              {/* Skip -15 */}
-              <button className="vp-btn" onClick={() => skip(-15)} title="Rewind 15s (←)">
+          {/* Track selector */}
+          {(audioStreams.length > 1 || subtitleStreams.length > 0) && (
+            <div className="vp-tracks-container mc-tracks">
+              <button className="mc-btn vp-btn" onClick={() => setShowTracks(t => !t)}
+                title="Audio & Subtitles">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
-                  <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
+                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
                 </svg>
               </button>
-
-              {/* Skip +15 */}
-              <button className="vp-btn" onClick={() => skip(15)} title="Forward 15s (→)">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
-                  <text x="7" y="16" fontSize="5.5" fill="currentColor" stroke="none" fontFamily="sans-serif">15</text>
-                </svg>
-              </button>
-
-              {/* Volume */}
-              <div className="vp-volume-group">
-                <button className="vp-btn" onClick={toggleMute} title="Mute (m)"><VolumeIcon /></button>
-                <input type="range" min="0" max="1" step="0.02"
-                  value={muted ? 0 : volume} onChange={handleVolumeChange} className="vp-volume-slider" />
-              </div>
-
-              <div className="vp-spacer" />
-
-              {/* Audio & Subtitle track selector */}
-              {(audioTracks.length > 0 || subtitleTracks.length > 0) && (
-                <div className="vp-tracks-container" style={{ position: "relative" }}>
-                  <button className="vp-btn" onClick={() => setShowTracks(!showTracks)} title="Audio & Subtitles">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                    </svg>
-                  </button>
-                  {showTracks && (
-                    <div className="vp-tracks-popup">
-                      {audioTracks.length > 0 && (
-                        <div className="vp-tracks-column">
-                          <div className="vp-tracks-header">Audio</div>
-                          {audioTracks.map((t, i) => (
-                            <div
-                              key={t.id}
-                              className={`vp-track-item ${currentAudioId === t.id ? "active" : ""}`}
-                              onClick={() => {
-                                invoke("mpv_set_audio_track", { id: t.id });
-                                setCurrentAudioId(t.id);
-                                setShowTracks(false);
-                              }}
-                            >
-                              {currentAudioId === t.id && <span className="vp-track-check">✓</span>}
-                              {getTrackLabel(t, i, "Audio")}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="vp-tracks-column">
-                        <div className="vp-tracks-header">Subtitles</div>
+              {showTracks && (
+                <div className="vp-tracks-popup">
+                  {audioStreams.length > 1 && (
+                    <div className="vp-tracks-column">
+                      <div className="vp-tracks-header">Audio</div>
+                      {audioStreams.map((s, i) => (
                         <div
-                          className={`vp-track-item ${currentSubtitleId === null ? "active" : ""}`}
-                          onClick={() => { invoke("mpv_set_subtitle_track", { id: -1 }); setCurrentSubtitleId(null); setShowTracks(false); }}
+                          key={s.index}
+                          className={`vp-track-item ${audioIdx === i ? "active" : ""}`}
+                          onClick={() => handleAudioChange(i)}
                         >
-                          {currentSubtitleId === null && <span className="vp-track-check">✓</span>}
-                          Off
+                          {audioIdx === i && <span className="vp-track-check">✓</span>}
+                          {getStreamLabel(s, i, "Audio")}
                         </div>
-                        {subtitleTracks.map((t, i) => (
-                          <div
-                            key={t.id}
-                            className={`vp-track-item ${currentSubtitleId === t.id ? "active" : ""}`}
-                            onClick={() => {
-                              invoke("mpv_set_subtitle_track", { id: t.id });
-                              setCurrentSubtitleId(t.id);
-                              setShowTracks(false);
-                            }}
-                          >
-                            {currentSubtitleId === t.id && <span className="vp-track-check">✓</span>}
-                            {getTrackLabel(t, i, "Subtitle")}
-                          </div>
-                        ))}
+                      ))}
+                    </div>
+                  )}
+                  {subtitleStreams.length > 0 && (
+                    <div className="vp-tracks-column">
+                      <div className="vp-tracks-header">Subtitles</div>
+                      <div
+                        className={`vp-track-item ${activeSubIdx === null ? "active" : ""}`}
+                        onClick={() => handleSubtitleChange(null)}
+                      >
+                        {activeSubIdx === null && <span className="vp-track-check">✓</span>}
+                        Off
                       </div>
+                      {subtitleStreams.map((s, i) => (
+                        <div
+                          key={s.index}
+                          className={`vp-track-item ${activeSubIdx === s.index ? "active" : ""}`}
+                          onClick={() => handleSubtitleChange(s.index)}
+                        >
+                          {activeSubIdx === s.index && <span className="vp-track-check">✓</span>}
+                          {getStreamLabel(s, i, "Subtitle")}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
               )}
-
-              {/* Set Intro button */}
-              <button className="vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(!settingIntro)} title="Set Intro Timestamps">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-                </svg>
-              </button>
-
-              {/* Fullscreen (controls mpv's window) */}
-              <button className="vp-btn" onClick={toggleFullscreen} title="Toggle mpv Fullscreen (f)">
-                {mpvFullscreen
-                  ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3" /></svg>
-                  : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
-                }
-              </button>
             </div>
+          )}
 
-            {settingIntro && (
-              <div className="vp-intro-setter">
-                <span className="vp-intro-setter-label">Intro end: {introEnd > 0 ? formatTime(introEnd) : "not set"}</span>
-                <button className="vp-intro-setter-btn" onClick={() => setIntroEnd(position)}>
-                  Mark Current as Intro End
-                </button>
-                <button className="vp-intro-setter-btn" onClick={() => { setIntroEnd(0); setSettingIntro(false); }}>Clear</button>
-              </div>
-            )}
-          </div>
-        </>
+          {/* Set Intro button */}
+          <button className="mc-btn vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(s => !s)}
+            title="Set Intro Timestamps">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+            </svg>
+          </button>
+
+          <MediaFullscreenButton className="mc-btn" />
+        </MediaControlBar>
       )}
-    </div>
+
+      {/* Set Intro panel */}
+      {settingIntro && !isEndscreenActive && (
+        <div className="vp-intro-setter">
+          <span className="vp-intro-setter-label">
+            Intro end: {introEnd > 0 ? formatTime(introEnd) : "not set"}
+          </span>
+          <button className="vp-intro-setter-btn" onClick={() => setIntroEnd(position)}>
+            Mark Current as Intro End
+          </button>
+          <button className="vp-intro-setter-btn"
+            onClick={() => { setIntroEnd(0); setSettingIntro(false); }}>
+            Clear
+          </button>
+        </div>
+      )}
+    </MediaController>
   );
 }

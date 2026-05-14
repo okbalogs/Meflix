@@ -675,13 +675,101 @@ html, body {
 .gradient-4 { background: linear-gradient(160deg, #b31a4e 0%, #0f2d5c 100%); }
 .gradient-5 { background: linear-gradient(160deg, #1e3a2f 0%, #2d3436 100%); }
 
-/* ─── Video Player ─── */
-.video-player-overlay {
-  position: fixed; inset: 0; z-index: 9999;
-  background: transparent; /* mpv renders in native X11 layer below WebKit */
+/* ─── Video Player (Media Chrome) ─── */
+.video-player-overlay,
+.mc-player {
+  position: fixed !important; inset: 0 !important; z-index: 9999;
+  background: #000;
   cursor: none;
+  width: 100% !important;
+  height: 100% !important;
+  display: block !important;
 }
-.video-player-overlay.controls-active { cursor: default; }
+.video-player-overlay.controls-active,
+.mc-player.controls-active { cursor: default; }
+
+/* Media Chrome CSS custom properties — dark Netflix theme */
+.mc-player {
+  --media-background-color: #000;
+  --media-primary-color: #fff;
+  --media-secondary-color: rgba(255, 255, 255, 0.7);
+  --media-control-background: transparent;
+  --media-control-hover-background: rgba(255, 255, 255, 0.15);
+  --media-range-track-color: rgba(255, 255, 255, 0.3);
+  --media-range-bar-color: var(--accent-red);
+  --media-range-thumb-color: #fff;
+  --media-range-thumb-width: 14px;
+  --media-range-thumb-height: 14px;
+  --media-icon-color: #fff;
+  --media-button-icon-width: 22px;
+  --media-button-icon-height: 22px;
+  --media-font-family: 'Netflix Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --media-font-size: 13px;
+  --media-text-color: #fff;
+  --media-loading-icon-color: #fff;
+  --media-tooltip-background: rgba(0, 0, 0, 0.8);
+  --media-tooltip-color: #fff;
+}
+
+/* Media Chrome built-in control bar */
+.mc-control-bar {
+  background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%) !important;
+  padding: 20px 40px 24px !important;
+  gap: 4px !important;
+  align-items: center !important;
+  transition: opacity 0.4s ease;
+  --media-control-bar-display: flex;
+}
+.controls-hidden .mc-control-bar { opacity: 0; pointer-events: none; }
+
+.mc-btn {
+  color: #fff;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 4px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.mc-btn:hover { background: rgba(255,255,255,0.15); }
+
+.mc-time {
+  color: #fff !important;
+  font-size: 13px !important;
+  letter-spacing: 0.3px;
+  --media-font-size: 13px;
+  margin: 0 4px;
+}
+
+.mc-time-range {
+  flex: 1 !important;
+  --media-range-track-height: 4px;
+  --media-range-bar-color: var(--accent-red);
+  --media-range-track-color: rgba(255,255,255,0.25);
+  --media-range-thumb-color: #fff;
+  margin: 0 8px;
+}
+
+.mc-volume {
+  width: 80px !important;
+  --media-range-track-height: 3px;
+  --media-range-bar-color: #fff;
+  --media-range-track-color: rgba(255,255,255,0.3);
+  --media-range-thumb-color: #fff;
+}
+
+.mc-next-btn {
+  display: flex; align-items: center; justify-content: center;
+}
+
+.mc-loading-indicator {
+  --media-loading-icon-color: #fff;
+}
+
+.mc-tracks {
+  position: relative;
+}
 
 .video-element {
   position: absolute; inset: 0;
@@ -690,30 +778,26 @@ html, body {
   cursor: pointer;
 }
 
-/* Transparent click target over the video area — mpv renders beneath WebKit */
-.mpv-backdrop {
-  position: absolute; inset: 0;
-  background: transparent;
-  cursor: pointer;
-}
-
-/* Top/bottom fade */
-.vp-top-bar, .vp-bottom-bar {
-  position: absolute; left: 0; right: 0;
-  z-index: 10; padding: 28px 48px;
-  transition: opacity 0.4s ease;
-}
+/* Top bar — rendered in Media Chrome's top-chrome slot */
 .vp-top-bar {
-  top: 0;
+  width: 100%;
+  z-index: 10; padding: 28px 48px;
   background: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, transparent 100%);
   display: flex; align-items: center; gap: 20px;
+  transition: opacity 0.4s ease;
 }
+.controls-hidden .vp-top-bar {
+  opacity: 0; pointer-events: none;
+}
+
+/* Keep legacy .vp-bottom-bar if referenced */
 .vp-bottom-bar {
-  bottom: 0;
+  position: absolute; left: 0; right: 0; bottom: 0;
+  z-index: 10; padding: 28px 48px;
   background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%);
   padding-top: 40px;
+  transition: opacity 0.4s ease;
 }
-.controls-hidden .vp-top-bar,
 .controls-hidden .vp-bottom-bar {
   opacity: 0; pointer-events: none;
 }
@@ -729,6 +813,12 @@ html, body {
   font-size: 1rem; font-weight: 500;
   color: #e5e5e5; opacity: 0.9;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1;
+}
+
+.vp-time-remaining-top {
+  font-size: 0.8rem; color: rgba(255,255,255,0.6);
+  white-space: nowrap; margin-left: auto;
 }
 
 /* Progress bar */
@@ -841,7 +931,8 @@ html, body {
   background: linear-gradient(135deg, #111, #222);
 }
 
-.vp-endscreen-active .video-element {
+.vp-endscreen-active .video-element,
+.vp-endscreen-active video {
   transform: scale(0.3) translate(5%, 5%);
   transform-origin: top left;
   border-radius: 12px;
@@ -855,10 +946,9 @@ html, body {
   max-height: calc(100vh - 80px);
 }
 
-/* During endscreen, darken the transparent video area so recommendations are readable */
-.vp-endscreen-active .mpv-backdrop {
-  background: rgba(0, 0, 0, 0.88);
-  transition: background 0.4s ease;
+/* Hide Media Chrome control bar during endscreen */
+.vp-endscreen-active .mc-control-bar {
+  display: none !important;
 }
 
 .endscreen-container {
