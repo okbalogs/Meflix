@@ -34,3 +34,7 @@ open = "5.1.4"
 axum = "0.7"
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(all(not(target_os = "android"), target_os = "linux"))'.dependencies]
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }

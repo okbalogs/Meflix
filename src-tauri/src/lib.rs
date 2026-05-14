@@ -1115,6 +1115,44 @@ fn start_streaming_server() {
 #[cfg(not(target_os = "android"))]
 const MPV_SOCKET: &str = "/tmp/meflix-mpv.sock";
 
+// Returns the X11 window ID of the Tauri main window for --wid embedding.
+// Returns None on Wayland, Windows, macOS, or if the window is not found.
+#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+fn get_x11_wid(app: &tauri::AppHandle) -> Option<u64> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use tauri::Manager;
+    let window = app.get_webview_window("main")?;
+    if let Ok(handle) = window.window_handle() {
+        match handle.as_raw() {
+            RawWindowHandle::Xlib(h) => return Some(h.window.get() as u64),
+            RawWindowHandle::Xcb(h) => return Some(h.window.get() as u64),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
+fn get_x11_wid(_app: &tauri::AppHandle) -> Option<u64> {
+    None
+}
+
+// Lower mpv's X11 child window below WebKit so the transparent WebView
+// composites over the top of the video instead of behind it.
+#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+fn restack_mpv_window(xid: u32) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConfigureWindowAux, StackMode};
+    if let Ok((conn, _)) = x11rb::connect(None) {
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::BELOW);
+        let _ = conn.configure_window(xid, &aux);
+        let _ = conn.flush();
+    }
+}
+
+#[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
+fn restack_mpv_window(_xid: u32) {}
+
 #[cfg(not(target_os = "android"))]
 pub struct MpvInner {
     handle: Option<tokio::process::Child>,
@@ -1169,6 +1207,8 @@ fn start_mpv_event_loop(app: tauri::AppHandle) {
             r#"{"command":["observe_property",6,"track-list"]}"#,
             r#"{"command":["observe_property",7,"fullscreen"]}"#,
             r#"{"command":["observe_property",8,"volume"]}"#,
+            // window-id lets us restack mpv's X11 child below the WebKit overlay
+            r#"{"command":["observe_property",9,"window-id"]}"#,
         ];
         for obs in observations {
             if write_half.write_all(format!("{}\n", obs).as_bytes()).await.is_err() {
@@ -1220,6 +1260,15 @@ fn start_mpv_event_loop(app: tauri::AppHandle) {
                         app.emit("mpv://volume", vol / 100.0).ok();
                     }
                 }
+                "window-id" => {
+                    // When mpv reports its X11 child window, lower it below the
+                    // WebKit overlay so the transparent CSS video area shows video.
+                    if let Some(xid) = data.as_u64() {
+                        if xid > 0 {
+                            restack_mpv_window(xid as u32);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1247,16 +1296,30 @@ async fn mpv_open(
     }
     let _ = std::fs::remove_file(MPV_SOCKET);
 
+    // On X11, embed mpv into the Tauri window. On Wayland or non-Linux,
+    // fall back to --force-window (separate OS window).
+    let x11_wid = get_x11_wid(&app);
+
     let mut args: Vec<String> = vec![
         format!("--input-ipc-server={}", MPV_SOCKET),
         "--keep-open=always".into(),
-        "--force-window=yes".into(),
         "--osd-level=0".into(),
         "--no-terminal".into(),
         "--really-quiet".into(),
         "--hr-seek=yes".into(),
         "--hr-seek-framedrop=no".into(),
     ];
+
+    if let Some(xid) = x11_wid {
+        // Embed into the Tauri X11 window; WebKit composites the controls overlay on top.
+        args.push(format!("--wid={}", xid));
+        args.push("--no-border".into());
+        // Don't let mpv resize the embedded window to match video AR — let CSS control layout.
+        args.push("--no-keepaspect-window".into());
+    } else {
+        // Wayland or non-Linux: play in a separate OS window.
+        args.push("--force-window=yes".into());
+    }
     if let Some(t) = start {
         if t > 0.5 {
             args.push(format!("--start={}", t));

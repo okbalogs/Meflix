@@ -678,7 +678,7 @@ html, body {
 /* ─── Video Player ─── */
 .video-player-overlay {
   position: fixed; inset: 0; z-index: 9999;
-  background: #000;
+  background: transparent; /* mpv renders in native X11 layer below WebKit */
   cursor: none;
 }
 .video-player-overlay.controls-active { cursor: default; }
@@ -690,13 +690,11 @@ html, body {
   cursor: pointer;
 }
 
-/* mpv backdrop — shown in the Tauri control-panel window while mpv renders video */
+/* Transparent click target over the video area — mpv renders beneath WebKit */
 .mpv-backdrop {
   position: absolute; inset: 0;
-  background: #000 center/cover no-repeat;
+  background: transparent;
   cursor: pointer;
-  filter: brightness(0.35) blur(2px);
-  transform: scale(1.04); /* hide blur edge */
 }
 
 /* Top/bottom fade */
@@ -843,8 +841,7 @@ html, body {
   background: linear-gradient(135deg, #111, #222);
 }
 
-.vp-endscreen-active .video-element,
-.vp-endscreen-active .mpv-backdrop {
+.vp-endscreen-active .video-element {
   transform: scale(0.3) translate(5%, 5%);
   transform-origin: top left;
   border-radius: 12px;
@@ -856,6 +853,12 @@ html, body {
   width: auto;
   height: auto;
   max-height: calc(100vh - 80px);
+}
+
+/* During endscreen, darken the transparent video area so recommendations are readable */
+.vp-endscreen-active .mpv-backdrop {
+  background: rgba(0, 0, 0, 0.88);
+  transition: background 0.4s ease;
 }
 
 .endscreen-container {
