@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem, TmdbRecommendation, MediaStream, MediaInfo, MediaChapter } from "../types";
 import { saveWatchRecord } from "../progressStore";
+import { IS_MOBILE } from "../utils";
 
 const getLanguageName = (code?: string | null) => {
   if (!code || code === 'und') return null;
@@ -301,14 +302,17 @@ export default function VideoPlayer({
     triggerSeek(newTime);
   };
 
-  const handleSeekMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  // Pointer events work for both mouse (desktop) and touch (mobile)
+  const handleSeekPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     isSeekingRef.current = true;
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
     seekToPosition(e.clientX);
-    const onMove = (ev: MouseEvent) => seekToPosition(ev.clientX);
-    const onUp = () => { isSeekingRef.current = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
   };
+  const handleSeekPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isSeekingRef.current) return;
+    seekToPosition(e.clientX);
+  };
+  const handleSeekPointerUp = () => { isSeekingRef.current = false; };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
@@ -350,7 +354,7 @@ export default function VideoPlayer({
     <div
       ref={playerRef}
       className={`video-player-overlay ${showControls && !isEndscreenActive ? "controls-active" : "controls-hidden"} ${isEndscreenActive ? "vp-endscreen-active" : ""}`}
-      onMouseMove={resetControlsTimer}
+      onPointerMove={resetControlsTimer}
       onMouseLeave={() => {
         if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
         controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 1000);
@@ -361,14 +365,15 @@ export default function VideoPlayer({
         className="video-element"
         src={activeSrc}
         autoPlay
+        playsInline
         onTimeUpdate={handleTimeUpdate}
         onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
+        onDoubleClick={IS_MOBILE ? undefined : toggleFullscreen}
         onWaiting={() => setIsBuffering(true)}
         onCanPlay={() => setIsBuffering(false)}
         onPlaying={() => { setIsBuffering(false); setPlaying(true); }}
         onPause={() => setPlaying(false)}
-        onError={() => { setHasError(true); setIsBuffering(false); if (onToast) onToast("Unable to play this file. FFmpeg may be required."); }}
+        onError={() => { setHasError(true); setIsBuffering(false); if (onToast) onToast(IS_MOBILE ? "Unable to play this file." : "Unable to play this file. FFmpeg may be required."); }}
         onLoadedMetadata={() => {
           if (!videoRef.current) return;
           setDuration(videoRef.current.duration);
@@ -394,7 +399,7 @@ export default function VideoPlayer({
       {hasError && (
         <div className="vp-error">
           <div className="vp-error-icon">⚠</div>
-          <div className="vp-error-msg">Unable to play this file. FFmpeg is required for MKV/AVI/MOV playback.</div>
+          <div className="vp-error-msg">{IS_MOBILE ? "Unable to play this file. The format may not be supported." : "Unable to play this file. FFmpeg is required for MKV/AVI/MOV playback."}</div>
           <button className="vp-error-btn" onClick={onClose}>Close Player</button>
         </div>
       )}
@@ -487,7 +492,11 @@ export default function VideoPlayer({
           {/* Bottom bar */}
           <div className="vp-bottom-bar">
         <div className="vp-progress-container">
-          <div className="vp-progress-track" ref={progressTrackRef} onMouseDown={handleSeekMouseDown}>
+          <div className="vp-progress-track" ref={progressTrackRef}
+               onPointerDown={handleSeekPointerDown}
+               onPointerMove={handleSeekPointerMove}
+               onPointerUp={handleSeekPointerUp}
+               onPointerCancel={handleSeekPointerUp}>
             <div className="vp-progress-bg" />
             <div className="vp-progress-fill" style={{ width: `${progressPct}%` }} />
           </div>
@@ -527,11 +536,13 @@ export default function VideoPlayer({
             </svg>
           </button>
 
-          <div className="vp-volume-group">
-            <button className="vp-btn" onClick={toggleMute} title="Mute (m)"><VolumeIcon /></button>
-            <input type="range" min="0" max="1" step="0.02"
-              value={muted ? 0 : volume} onChange={handleVolumeChange} className="vp-volume-slider" />
-          </div>
+          {!IS_MOBILE && (
+            <div className="vp-volume-group">
+              <button className="vp-btn" onClick={toggleMute} title="Mute (m)"><VolumeIcon /></button>
+              <input type="range" min="0" max="1" step="0.02"
+                value={muted ? 0 : volume} onChange={handleVolumeChange} className="vp-volume-slider" />
+            </div>
+          )}
 
           <div className="vp-spacer" />
 
@@ -596,18 +607,22 @@ export default function VideoPlayer({
             </div>
           )}
 
-          <button className="vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(!settingIntro)} title="Set Intro Timestamps">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
-            </svg>
-          </button>
+          {!IS_MOBILE && (
+            <button className="vp-btn vp-set-intro-btn" onClick={() => setSettingIntro(!settingIntro)} title="Set Intro Timestamps">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
+              </svg>
+            </button>
+          )}
 
-          <button className="vp-btn" onClick={toggleFullscreen} title="Fullscreen (f)">
-            {document.fullscreenElement
-              ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/></svg>
-              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
-            }
-          </button>
+          {!IS_MOBILE && (
+            <button className="vp-btn" onClick={toggleFullscreen} title="Fullscreen (f)">
+              {document.fullscreenElement
+                ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/></svg>
+                : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
+              }
+            </button>
+          )}
         </div>
 
         {settingIntro && (
