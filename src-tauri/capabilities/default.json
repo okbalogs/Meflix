@@ -13,7 +13,12 @@
     "fs:write-all",
     {
       "identifier": "fs:scope",
-      "allow": [{ "path": "**" }]
+      "allow": [
+        { "path": "**" },
+        { "path": "/storage/**" },
+        { "path": "/sdcard/**" },
+        { "path": "/data/user/**" }
+      ]
     }
   ]
 }

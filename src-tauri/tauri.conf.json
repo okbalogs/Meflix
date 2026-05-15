@@ -24,11 +24,18 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$HOME/.meflix/**"],
+          "allow": [
+            "$HOME/.meflix/**",
+            "$APPDATA/**",
+            "$HOME/**",
+            "/storage/**",
+            "/sdcard/**",
+            "/data/user/**"
+          ],
           "deny": []
         }
       },
-      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost blob:; media-src 'self' asset: https://asset.localhost blob: http://127.0.0.1:1421; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.themoviedb.org https://image.tmdb.org http://127.0.0.1:1421"
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost blob: https://image.tmdb.org; media-src 'self' asset: https://asset.localhost blob: http://127.0.0.1:1421; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.themoviedb.org https://image.tmdb.org http://127.0.0.1:1421"
     }
   },
   "bundle": {

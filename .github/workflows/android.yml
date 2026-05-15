@@ -1,62 +1,112 @@
-name: Build Android APK
+name: Meflix Android (Tauri)
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/gradle-debug-build-QxixK"]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android.yml"
   workflow_dispatch:
 
 jobs:
-  build-android:
+  build:
+    name: Build debug APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── Node ─────────────────────────────────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ── Java (Android Gradle needs it) ────────────────────────────────────
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ── Android SDK + NDK ─────────────────────────────────────────────────
+      - name: Install Android SDK components and NDK
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "platform-tools" \
+            "ndk;25.2.9519653"
+          # Persist all three vars so every subsequent step sees them
+          echo "ANDROID_HOME=$ANDROID_HOME"                       >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"                   >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653"         >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
-      - name: Install Android NDK 27
-        run: sdkmanager "ndk;27.0.12077973"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Setup Rust stable
+      # ── Rust ─────────────────────────────────────────────────────────────
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      - name: Add Android Rust targets
+        run: |
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            i686-linux-android \
+            x86_64-linux-android
 
-      - name: Install frontend dependencies
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-android-
+
+      # ── Frontend ──────────────────────────────────────────────────────────
+      - name: Install npm dependencies
         run: npm ci
 
+      # ── Tauri Android ─────────────────────────────────────────────────────
       - name: Initialize Tauri Android project
         run: npm run tauri android init
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      - name: Build Android APK (debug)
-        run: npm run tauri android build -- --apk --debug
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+      - name: Patch AndroidManifest with storage permissions
+        run: |
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Insert storage permission lines just before <application
+          sed -i 's|<application|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <application|' "$MANIFEST"
+          echo "=== Patched manifest ==="
+          grep -A 5 "READ_EXTERNAL" "$MANIFEST" || echo "WARNING: patch may have failed"
 
-      - name: Upload APK artifact
+      - name: Build debug APK
+        run: npm run tauri android build -- --debug
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "=== Last Cargo errors ==="
+          find src-tauri/target -name "*.log" 2>/dev/null \
+            | xargs grep -l "^error" 2>/dev/null | head -3 | xargs cat 2>/dev/null || true
+          echo "=== Gradle log tail ==="
+          find src-tauri/gen/android -name "*.log" 2>/dev/null \
+            | xargs tail -n 60 2>/dev/null || true
+
+      # ── Artifact ──────────────────────────────────────────────────────────
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: meflix-android-apk
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: meflix-android-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
           if-no-files-found: error
+          retention-days: 30

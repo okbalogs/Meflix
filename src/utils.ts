@@ -16,7 +16,15 @@ export function cleanEpisodeName(name: string): string {
   return cleaned.trim();
 }
 
+// True on Android WebView (Tauri mobile) — Android UA always present in embedded WebView
+export const IS_MOBILE = /Android/i.test(navigator.userAgent);
+
 export async function toPlaySrc(path: string, audioIdx: number | null = null, start: number | null = null): Promise<string> {
+  // No FFmpeg streaming server on mobile — use Tauri asset protocol directly for every format
+  if (IS_MOBILE) {
+    return convertFileSrc(path);
+  }
+
   const ext = path.split('.').pop()?.toLowerCase() || '';
   if (['mkv', 'avi', 'flv', 'mov'].includes(ext)) {
     const audioQuery = audioIdx !== null ? `&a=${audioIdx}` : '';

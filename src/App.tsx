@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { requestPermissions } from "@tauri-apps/plugin-fs";
 import type { MediaItem, AppSettings } from "./types";
-import { toPlaySrc, buildSeriesQueue } from "./utils";
+import { toPlaySrc, buildSeriesQueue, IS_MOBILE } from "./utils";
 import { loadAllProgress, type ProgressStore } from "./progressStore";
 import { loadMyList, toggleMyList } from "./myList";
 import { loadFirstSeen, trackNewItems, type FirstSeenStore } from "./recentlyAdded";
@@ -62,6 +63,9 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      if (IS_MOBILE) {
+        try { await requestPermissions(); } catch { /* ignore — some Android versions don't need it */ }
+      }
       try {
         const s = await invoke<AppSettings>("load_settings");
         setSettings(s);
@@ -214,6 +218,12 @@ export default function App() {
     } catch (e) { console.error("Dialog error:", e); }
   };
 
+  const addFolderPath = (path: string) => {
+    if (!settingsDraft.source_folders.includes(path)) {
+      setSettingsDraft(prev => ({ ...prev, source_folders: [...prev.source_folders, path] }));
+    }
+  };
+
   const removeFolder = (idx: number) => {
     setSettingsDraft(prev => ({ ...prev, source_folders: prev.source_folders.filter((_, i) => i !== idx) }));
   };
@@ -223,8 +233,15 @@ export default function App() {
       await invoke("save_settings", { settings: settingsDraft });
       setSettings(settingsDraft);
       setShowSettings(false);
-      if (settingsDraft.source_folders.length > 0) scanLibrary(settingsDraft.source_folders, settingsDraft.tmdb_api_key);
-    } catch (e) { console.error("Save settings error:", e); }
+      if (settingsDraft.source_folders.length > 0) {
+        scanLibrary(settingsDraft.source_folders, settingsDraft.tmdb_api_key);
+      } else {
+        showToast("Settings saved.");
+      }
+    } catch (e) {
+      console.error("Save settings error:", e);
+      showToast(`Save failed: ${e}`);
+    }
   };
 
   const handleInfo = (item: MediaItem) => { setDetailItem(item); setSelectedSeason(item.seasons[0]?.number || 1); };
@@ -373,7 +390,7 @@ export default function App() {
           showApiKey={showApiKey} setShowApiKey={setShowApiKey}
           onClose={() => setShowSettings(false)}
           onSave={saveSettings}
-          onAddFolder={addFolder} onRemoveFolder={removeFolder}
+          onAddFolder={addFolder} onAddFolderPath={addFolderPath} onRemoveFolder={removeFolder}
         />
       )}
 

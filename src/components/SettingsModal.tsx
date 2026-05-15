@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AppSettings } from "../types";
+import { IS_MOBILE } from "../utils";
 
 type Tab = "library" | "api";
 
@@ -11,15 +12,30 @@ interface SettingsModalProps {
   onClose: () => void;
   onSave: () => void;
   onAddFolder: () => void;
+  onAddFolderPath: (path: string) => void;
   onRemoveFolder: (idx: number) => void;
 }
+
+const QUICK_PATHS = [
+  { label: "Movies",    path: "/storage/emulated/0/Movies" },
+  { label: "Downloads", path: "/storage/emulated/0/Download" },
+  { label: "Videos",    path: "/storage/emulated/0/DCIM/Videos" },
+  { label: "DCIM",      path: "/storage/emulated/0/DCIM" },
+  { label: "All Storage", path: "/storage/emulated/0" },
+];
 
 export default function SettingsModal({
   settingsDraft, setSettingsDraft,
   showApiKey, setShowApiKey,
-  onClose, onSave, onAddFolder, onRemoveFolder,
+  onClose, onSave, onAddFolder, onAddFolderPath, onRemoveFolder,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("library");
+  const [manualPath, setManualPath] = useState("");
+
+  const handleAddManual = () => {
+    const p = manualPath.trim();
+    if (p) { onAddFolderPath(p); setManualPath(""); }
+  };
 
   return (
     <div className="settings-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -101,12 +117,42 @@ export default function SettingsModal({
                   ))}
                 </div>
 
-                <button className="settings-add-btn" onClick={onAddFolder}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  Add Media Folder
-                </button>
+                {IS_MOBILE ? (
+                  <div className="folder-add-mobile">
+                    <div className="folder-quick-paths">
+                      {QUICK_PATHS.map(qp => (
+                        <button
+                          key={qp.path}
+                          className="folder-quick-chip"
+                          onClick={() => onAddFolderPath(qp.path)}
+                          disabled={settingsDraft.source_folders.includes(qp.path)}
+                        >
+                          {qp.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="folder-manual-row">
+                      <input
+                        className="folder-path-input"
+                        type="text"
+                        placeholder="/storage/emulated/0/..."
+                        value={manualPath}
+                        onChange={e => setManualPath(e.target.value)}
+                        onKeyDown={e => e.key === "Enter" && handleAddManual()}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                      <button className="folder-add-go" onClick={handleAddManual}>Add</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="settings-add-btn" onClick={onAddFolder}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Add Media Folder
+                  </button>
+                )}
               </div>
             )}
 
