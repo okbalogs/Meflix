@@ -6,6 +6,7 @@ enum class MediaType : Serializable { MOVIE, SERIES }
 
 data class Episode(
     val path: String,
+    val contentUri: String = "",
     val displayName: String,
     val season: Int,
     val episode: Int,
@@ -21,30 +22,29 @@ data class Season(
 ) : Serializable
 
 data class MediaItem(
-    val id: String,                    // unique: folder path or file path
-    val title: String,                 // display title (cleaned folder/file name)
+    val id: String,
+    val title: String,
     val type: MediaType,
-    val folderPath: String,            // directory containing the media
-    val filePath: String,              // single file path (movies) or first episode (series)
+    val folderPath: String,
+    val filePath: String,
+    val contentUri: String = "",
     val seasons: List<Season> = emptyList(),
     val durationMs: Long = 0L,
 
     // TMDB metadata (null until fetched)
     val tmdbId: Int? = null,
     val overview: String? = null,
-    val posterPath: String? = null,    // local file path to cached poster
-    val backdropPath: String? = null,  // local file path to cached backdrop
+    val posterPath: String? = null,
+    val backdropPath: String? = null,
     val rating: Float? = null,
     val year: String? = null,
     val genres: List<String> = emptyList()
 ) : Serializable {
-    /** All episodes in season-then-episode order (for series queue). */
     val allEpisodes: List<Episode>
         get() = seasons.sortedBy { it.number }.flatMap { s ->
             s.episodes.sortedBy { it.episode }
         }
 
-    /** Gradient index derived from title hash (0-4) */
     val gradientIndex: Int
         get() = ((title.hashCode() and Int.MAX_VALUE) % 5)
 }

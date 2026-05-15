@@ -13,8 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import com.meflix.app.data.model.MediaItem
 import com.meflix.app.ui.theme.GradientPairs
@@ -29,50 +32,55 @@ fun BillboardHeader(
     onInfoClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val screenHeight = LocalConfiguration.current.screenHeightDp
+    val billboardHeight = (screenHeight * 0.72f).dp
     val gradientPair = GradientPairs[item.gradientIndex]
     val backdropFile = item.backdropPath?.let { File(it) }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(480.dp)
+            .height(billboardHeight)
     ) {
-        // Background image (backdrop)
+        // Background image
         if (backdropFile != null && backdropFile.exists()) {
             SubcomposeAsyncImage(
                 model = backdropFile,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
-                error = {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(gradientPair.first, gradientPair.second)
-                                )
-                            )
-                    )
-                }
+                error = { GradientBackground(gradientPair) }
+            )
+        } else if (item.posterPath?.let { File(it) }?.exists() == true) {
+            SubcomposeAsyncImage(
+                model = File(item.posterPath!!),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                error = { GradientBackground(gradientPair) }
             )
         } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(gradientPair.first, gradientPair.second)
-                        )
-                    )
-            )
+            GradientBackground(gradientPair)
         }
 
-        // Bottom fade scrim into background
+        // Multi-layer gradient for depth (sides + heavy bottom scrim)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.3f),
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.3f)
+                        )
+                    )
+                )
+        )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(200.dp)
+                .fillMaxHeight(0.6f)
                 .align(Alignment.BottomCenter)
                 .background(
                     Brush.verticalGradient(
@@ -81,58 +89,62 @@ fun BillboardHeader(
                 )
         )
 
-        // Content overlay
+        // Content at the bottom
         Column(
             modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(horizontal = 16.dp, vertical = 24.dp)
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Title
             Text(
                 text = item.title,
-                style = MaterialTheme.typography.headlineMedium,
+                color = Color.White,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                color = Color.White
+                lineHeight = 32.sp
             )
 
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(6.dp))
 
-            // Year + Rating
+            // Metadata row
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                item.year?.let { year ->
-                    Text(
-                        text = year,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.8f)
-                    )
+                item.year?.let {
+                    Text(it, color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                    if (item.rating != null || item.genres.isNotEmpty()) {
+                        Text("  •  ", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                    }
                 }
-                item.rating?.let { rating ->
-                    Text(
-                        text = "%.1f ★".format(rating),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary
-                    )
+                item.rating?.let {
+                    Text("%.1f ★".format(it), color = Color(0xFFFDD835), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    if (item.genres.isNotEmpty()) {
+                        Text("  •  ", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                    }
                 }
                 if (item.genres.isNotEmpty()) {
                     Text(
-                        text = item.genres.take(2).joinToString(" · "),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.7f),
+                        item.genres.take(2).joinToString(" • "),
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 13.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
 
-            // Buttons
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // Action buttons
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Button(
                     onClick = onPlayClick,
                     colors = ButtonDefaults.buttonColors(
@@ -140,34 +152,39 @@ fun BillboardHeader(
                         contentColor = Color.Black
                     ),
                     shape = RoundedCornerShape(4.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(
-                        Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Play", style = MaterialTheme.typography.labelLarge)
+                    Text("Play", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                 }
 
                 OutlinedButton(
                     onClick = onInfoClick,
                     colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.White.copy(alpha = 0.15f),
                         contentColor = Color.White
                     ),
+                    border = null,
                     shape = RoundedCornerShape(4.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(
-                        Icons.Default.Info,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("More Info", style = MaterialTheme.typography.labelLarge)
+                    Text("More Info", fontSize = 15.sp)
                 }
             }
         }
     }
+}
+
+@Composable
+private fun GradientBackground(gradientPair: Pair<Color, Color>) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(gradientPair.first, gradientPair.second)))
+    )
 }

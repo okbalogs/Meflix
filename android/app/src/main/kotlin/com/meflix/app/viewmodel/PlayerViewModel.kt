@@ -95,6 +95,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun openMedia(
         paths: List<String>,
+        contentUris: List<String> = emptyList(),
         titles: List<String> = emptyList(),
         startIndex: Int = 0,
         startPositionMs: Long = 0L,
@@ -104,8 +105,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _queue.value = paths
         _queueTitles.value = titles
 
-        val mediaItems = paths.map { path ->
-            Media3Item.fromUri(Uri.fromFile(File(path)))
+        val mediaItems = paths.mapIndexed { i, path ->
+            val uri = contentUris.getOrNull(i)?.takeIf { it.isNotBlank() }
+                ?.let { Uri.parse(it) }
+                ?: Uri.fromFile(File(path))
+            Media3Item.fromUri(uri)
         }
 
         player.setMediaItems(mediaItems, startIndex, startPositionMs)

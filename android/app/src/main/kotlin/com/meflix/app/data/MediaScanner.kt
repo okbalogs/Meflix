@@ -1,5 +1,6 @@
 package com.meflix.app.data
 
+import android.content.ContentUris
 import android.content.Context
 import android.provider.MediaStore
 import com.meflix.app.data.model.Episode
@@ -13,26 +14,21 @@ private val SKIP_PATTERN = Regex("""(?i)(sample|trailer|featurette|interview|beh
 private val CLEAN_TITLE_PATTERN = Regex("""[._\-]+""")
 private val YEAR_SUFFIX_PATTERN = Regex("""\s*\(\d{4}\)\s*$""")
 
-/**
- * Scans the device MediaStore for video files, groups them into MediaItems
- * (movies or series), and returns a sorted list.
- */
-class MediaScanner(private val context: Context) {
+class MediaScanner(
+    private val context: Context,
+    private val filterFolders: List<String> = emptyList()
+) {
 
     data class RawVideo(
         val id: Long,
         val displayName: String,
         val data: String,
+        val contentUri: String,
         val durationMs: Long,
         val bucketName: String
     )
 
-    fun scan(): List<MediaItem> {
-        val rawVideos = queryMediaStore()
-        return groupIntoMediaItems(rawVideos)
-    }
-
-    // ── MediaStore query ──────────────────────────────────────────────────────
+    fun scan(): List<MediaItem> = groupIntoMediaItems(queryMediaStore())
 
     private fun queryMediaStore(): List<RawVideo> {
         val projection = arrayOf(
@@ -43,16 +39,24 @@ class MediaScanner(private val context: Context) {
             MediaStore.Video.Media.BUCKET_DISPLAY_NAME
         )
 
-        val selection = "${MediaStore.Video.Media.DURATION} > ?"
-        val selectionArgs = arrayOf("60000") // > 1 minute
+        val selectionParts = mutableListOf("${MediaStore.Video.Media.DURATION} > ?")
+        val args = mutableListOf("60000")
+
+        if (filterFolders.isNotEmpty()) {
+            val clauses = filterFolders.joinToString(" OR ") {
+                "${MediaStore.Video.Media.DATA} LIKE ?"
+            }
+            selectionParts.add("($clauses)")
+            filterFolders.forEach { args.add("$it/%") }
+        }
 
         val results = mutableListOf<RawVideo>()
 
         context.contentResolver.query(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             projection,
-            selection,
-            selectionArgs,
+            selectionParts.joinToString(" AND "),
+            args.toTypedArray(),
             "${MediaStore.Video.Media.DISPLAY_NAME} ASC"
         )?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
@@ -62,19 +66,25 @@ class MediaScanner(private val context: Context) {
             val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
 
             while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
                 val name = cursor.getString(nameCol) ?: continue
                 val data = cursor.getString(dataCol) ?: continue
 
-                // Skip samples / trailers
                 if (SKIP_PATTERN.containsMatchIn(name)) continue
                 if (SKIP_PATTERN.containsMatchIn(data)) continue
 
+                val contentUri = ContentUris.withAppendedId(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id
+                ).toString()
+
                 results += RawVideo(
-                    id = cursor.getLong(idCol),
+                    id = id,
                     displayName = name,
                     data = data,
+                    contentUri = contentUri,
                     durationMs = cursor.getLong(durCol),
-                    bucketName = cursor.getString(bucketCol) ?: File(data).parentFile?.name ?: "Unknown"
+                    bucketName = cursor.getString(bucketCol)
+                        ?: File(data).parentFile?.name ?: "Unknown"
                 )
             }
         }
@@ -82,31 +92,21 @@ class MediaScanner(private val context: Context) {
         return results
     }
 
-    // ── Grouping ──────────────────────────────────────────────────────────────
-
     private fun groupIntoMediaItems(videos: List<RawVideo>): List<MediaItem> {
-        // Group by directory path
         val byDirectory = videos.groupBy { File(it.data).parent ?: "/" }
-
         val items = mutableListOf<MediaItem>()
 
         for ((dirPath, files) in byDirectory) {
             val hasSeriesFiles = files.any { SE_PATTERN.containsMatchIn(it.displayName) }
-
             if (hasSeriesFiles || files.size > 1) {
-                // Treat as a series
                 items += buildSeriesItem(dirPath, files)
             } else {
-                // Single file → movie
-                val video = files.first()
-                items += buildMovieItem(video, dirPath)
+                items += buildMovieItem(files.first(), dirPath)
             }
         }
 
         return items.sortedBy { it.title.lowercase() }
     }
-
-    // ── Movie item ────────────────────────────────────────────────────────────
 
     private fun buildMovieItem(video: RawVideo, dirPath: String): MediaItem {
         val title = cleanTitle(File(video.displayName).nameWithoutExtension)
@@ -116,40 +116,37 @@ class MediaScanner(private val context: Context) {
             type = MediaType.MOVIE,
             folderPath = dirPath,
             filePath = video.data,
+            contentUri = video.contentUri,
             durationMs = video.durationMs
         )
     }
 
-    // ── Series item ───────────────────────────────────────────────────────────
-
     private fun buildSeriesItem(dirPath: String, files: List<RawVideo>): MediaItem {
-        val folderName = File(dirPath).name
-        val seriesTitle = cleanTitle(folderName)
+        val seriesTitle = cleanTitle(File(dirPath).name)
 
-        // Parse each file into an Episode
         val episodes = files.mapNotNull { video ->
             val nameWithoutExt = File(video.displayName).nameWithoutExtension
             val match = SE_PATTERN.find(nameWithoutExt)
             if (match != null) {
                 val season = match.groupValues[1].toIntOrNull() ?: 1
                 val episode = match.groupValues[2].toIntOrNull() ?: 1
-                // Clean episode title: remove the SxxExx portion and any leading/trailing punctuation
                 val cleanName = nameWithoutExt
                     .replace(SE_PATTERN, "")
                     .trim(' ', '-', '_', '.')
                     .ifBlank { "Episode $episode" }
                 Episode(
                     path = video.data,
+                    contentUri = video.contentUri,
                     displayName = cleanName,
                     season = season,
                     episode = episode,
                     durationMs = video.durationMs
                 )
             } else {
-                // No S/E pattern — still include as season 1 based on sorted order
                 val sortedIdx = files.sortedBy { it.data }.indexOf(video)
                 Episode(
                     path = video.data,
+                    contentUri = video.contentUri,
                     displayName = File(video.displayName).nameWithoutExtension,
                     season = 1,
                     episode = sortedIdx + 1,
@@ -158,9 +155,7 @@ class MediaScanner(private val context: Context) {
             }
         }
 
-        // Group into seasons
-        val seasonMap = episodes.groupBy { it.season }
-        val seasons = seasonMap.map { (num, eps) ->
+        val seasons = episodes.groupBy { it.season }.map { (num, eps) ->
             Season(number = num, episodes = eps.sortedBy { it.episode })
         }.sortedBy { it.number }
 
@@ -172,12 +167,11 @@ class MediaScanner(private val context: Context) {
             type = MediaType.SERIES,
             folderPath = dirPath,
             filePath = firstEpisode?.path ?: files.first().data,
+            contentUri = firstEpisode?.contentUri ?: files.first().contentUri,
             seasons = seasons,
             durationMs = firstEpisode?.durationMs ?: 0L
         )
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun cleanTitle(raw: String): String {
         return raw

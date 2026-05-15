@@ -1,12 +1,19 @@
 package com.meflix.app.ui
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.BorderStroke
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -15,24 +22,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meflix.app.data.FolderStore
 import com.meflix.app.ui.theme.NetflixBlack
 import com.meflix.app.ui.theme.NetflixRed
 import com.meflix.app.viewmodel.LibraryViewModel
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-// DataStore singleton extension
 private val android.content.Context.dataStore: DataStore<Preferences>
     by preferencesDataStore(name = "meflix_settings")
 
@@ -47,8 +56,9 @@ fun SettingsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val uiState by libraryViewModel.uiState.collectAsState()
+    val folderStore = remember { FolderStore(context) }
+    val scanFolders by folderStore.folders.collectAsState(initial = emptyList())
 
-    // Load saved API key from DataStore
     val savedApiKey by context.dataStore.data
         .map { prefs -> prefs[TMDB_API_KEY_KEY] ?: "" }
         .collectAsState(initial = "")
@@ -57,14 +67,25 @@ fun SettingsScreen(
     var showApiKey by remember { mutableStateOf(false) }
     var showSavedSnack by remember { mutableStateOf(false) }
 
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let {
+            context.contentResolver.takePersistableUriPermission(
+                it, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+            FolderStore.pathFromTreeUri(it)?.let { path ->
+                scope.launch { folderStore.addFolder(path) }
+            }
+        }
+    }
+
     Scaffold(
         containerColor = NetflixBlack,
         contentWindowInsets = WindowInsets(0),
         topBar = {
             TopAppBar(
-                title = {
-                    Text("Settings", color = Color.White)
-                },
+                title = { Text("Settings", color = Color.White, fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, "Back", tint = Color.White)
@@ -88,185 +109,226 @@ fun SettingsScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
-            // TMDB API Key section
-            SettingsSection(title = "TMDB API Key") {
-                Text(
-                    "Enter your TMDB API key to fetch movie/series metadata (posters, overviews, ratings).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = apiKeyInput,
-                    onValueChange = { apiKeyInput = it },
-                    label = { Text("API Key") },
-                    placeholder = { Text("Paste your TMDB v3 API key here", color = Color.Gray) },
-                    singleLine = true,
-                    visualTransformation = if (showApiKey) VisualTransformation.None
-                                           else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Done
-                    ),
-                    trailingIcon = {
-                        IconButton(onClick = { showApiKey = !showApiKey }) {
-                            Icon(
-                                if (showApiKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (showApiKey) "Hide" else "Show",
-                                tint = Color.Gray
-                            )
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = NetflixRed,
-                        unfocusedBorderColor = Color.Gray,
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        cursorColor = NetflixRed,
-                        focusedLabelColor = NetflixRed,
-                        unfocusedLabelColor = Color.Gray
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        scope.launch {
-                            context.dataStore.edit { prefs ->
-                                prefs[TMDB_API_KEY_KEY] = apiKeyInput.trim()
-                            }
-                            showSavedSnack = true
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save API Key")
-                }
-            }
 
-            // Fetch metadata section
-            SettingsSection(title = "Metadata") {
-                Text(
-                    "Fetch poster images, overviews, and ratings for all items in your library.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
-                Spacer(Modifier.height(12.dp))
+                // ── Scan Folders ──────────────────────────────────────────────
+                SettingsSection(title = "Scan Folders") {
+                    Text(
+                        "Choose which folders Meflix scans for video files. If no folders are added, all videos on the device will be scanned.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF808080)
+                    )
+                    Spacer(Modifier.height(12.dp))
 
-                if (uiState.isFetchingMetadata) {
-                    val (done, total) = uiState.metadataProgress
-                    Column {
-                        LinearProgressIndicator(
-                            progress = { if (total > 0) done.toFloat() / total else 0f },
-                            modifier = Modifier.fillMaxWidth(),
-                            color = NetflixRed
-                        )
-                        Spacer(Modifier.height(4.dp))
+                    if (scanFolders.isEmpty()) {
                         Text(
-                            "Fetching $done / $total…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray
+                            "No folders selected — scanning all videos.",
+                            fontSize = 13.sp,
+                            color = Color(0xFF808080)
                         )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            scanFolders.forEach { path ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        path,
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = { scope.launch { folderStore.removeFolder(path) } },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            "Remove",
+                                            tint = Color(0xFF808080),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                            }
+                        }
                     }
-                } else {
+
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedButton(
+                        onClick = { folderPickerLauncher.launch(null) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NetflixRed),
+                        border = BorderStroke(1.dp, NetflixRed),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Icon(Icons.Default.CreateNewFolder, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Add Folder")
+                    }
+                }
+
+                // ── Library ───────────────────────────────────────────────────
+                SettingsSection(title = "Library") {
+                    Text(
+                        "Scan ${if (scanFolders.isEmpty()) "all videos" else "selected folders"} for media files.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF808080)
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    if (uiState.isScanning) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = NetflixRed, strokeWidth = 2.dp)
+                            Text("Scanning…", color = Color(0xFF808080), fontSize = 13.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick = { libraryViewModel.scanLibrary(context) },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text("Scan Library")
+                        }
+                    }
+                }
+
+                // ── TMDB API Key ──────────────────────────────────────────────
+                SettingsSection(title = "TMDB API Key") {
+                    Text(
+                        "Add your TMDB API key to fetch posters, ratings, and overviews.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF808080)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = { apiKeyInput = it },
+                        label = { Text("API Key") },
+                        placeholder = { Text("Paste your TMDB v3 API key", color = Color(0xFF808080)) },
+                        singleLine = true,
+                        visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                        trailingIcon = {
+                            IconButton(onClick = { showApiKey = !showApiKey }) {
+                                Icon(
+                                    if (showApiKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    tint = Color(0xFF808080)
+                                )
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = NetflixRed,
+                            unfocusedBorderColor = Color(0xFF404040),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = NetflixRed,
+                            focusedLabelColor = NetflixRed,
+                            unfocusedLabelColor = Color(0xFF808080)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
                     Button(
                         onClick = {
-                            libraryViewModel.fetchMetadata(context, apiKeyInput.trim())
+                            scope.launch {
+                                context.dataStore.edit { prefs ->
+                                    prefs[TMDB_API_KEY_KEY] = apiKeyInput.trim()
+                                }
+                                showSavedSnack = true
+                            }
                         },
-                        enabled = apiKeyInput.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                        shape = RoundedCornerShape(4.dp),
                         modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Fetch All Metadata")
+                    ) { Text("Save API Key") }
+                }
+
+                // ── Metadata ──────────────────────────────────────────────────
+                SettingsSection(title = "Metadata") {
+                    Text(
+                        "Fetch poster images, overviews, and ratings for all items in your library.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF808080)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    if (uiState.isFetchingMetadata) {
+                        val (done, total) = uiState.metadataProgress
+                        Column {
+                            LinearProgressIndicator(
+                                progress = { if (total > 0) done.toFloat() / total else 0f },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = NetflixRed,
+                                trackColor = Color(0xFF2D2D2D)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text("Fetching $done / $total", fontSize = 12.sp, color = Color(0xFF808080))
+                        }
+                    } else {
+                        Button(
+                            onClick = { libraryViewModel.fetchMetadata(context, apiKeyInput.trim()) },
+                            enabled = apiKeyInput.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Fetch All Metadata") }
                     }
                 }
-            }
 
-            // Library section
-            SettingsSection(title = "Library") {
-                Text(
-                    "Rescan your device for new video files.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
-                Spacer(Modifier.height(12.dp))
-
-                if (uiState.isScanning) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = NetflixRed
-                        )
-                        Text("Scanning…", color = Color.Gray)
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { libraryViewModel.scanLibrary(context) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NetflixRed)
-                    ) {
-                        Text("Rescan Library")
-                    }
+                // ── About ─────────────────────────────────────────────────────
+                SettingsSection(title = "About") {
+                    InfoRow("App", "Meflix")
+                    InfoRow("Version", "1.0.0")
+                    InfoRow("Media API", "TMDB")
+                    InfoRow("Player", "ExoPlayer (Media3)")
                 }
+
+                Spacer(Modifier.height(32.dp))
             }
 
-            // App info section
-            SettingsSection(title = "About") {
-                SettingsInfoRow("App", "Meflix")
-                SettingsInfoRow("Version", "1.0.0")
-                SettingsInfoRow("Media API", "TMDB")
-                SettingsInfoRow("Player", "ExoPlayer (Media3)")
-            }
-
-            Spacer(Modifier.height(32.dp))
-        }
-
-        // Saved snackbar
-        if (showSavedSnack) {
-            LaunchedEffect(Unit) {
-                kotlinx.coroutines.delay(2000)
-                showSavedSnack = false
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Snackbar {
-                    Text("API key saved")
+            if (showSavedSnack) {
+                LaunchedEffect(Unit) {
+                    kotlinx.coroutines.delay(2000)
+                    showSavedSnack = false
+                }
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF323232)) {
+                        Text("API key saved", color = Color.White, modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
+                    }
                 }
             }
         }
-        } // outer Box
     }
 }
 
 @Composable
-private fun SettingsSection(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit
-) {
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
             color = NetflixRed,
-            modifier = Modifier.padding(bottom = 12.dp)
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(bottom = 10.dp)
         )
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1F1F)),
-            shape = MaterialTheme.shapes.medium
+            shape = RoundedCornerShape(6.dp)
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
                 content = content
             )
         }
@@ -274,14 +336,12 @@ private fun SettingsSection(
 }
 
 @Composable
-private fun SettingsInfoRow(label: String, value: String) {
+private fun InfoRow(label: String, value: String) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-        Text(value, style = MaterialTheme.typography.bodyMedium, color = Color.White)
+        Text(label, color = Color(0xFF808080), fontSize = 14.sp)
+        Text(value, color = Color.White, fontSize = 14.sp)
     }
 }
