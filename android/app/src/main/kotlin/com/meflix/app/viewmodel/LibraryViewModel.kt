@@ -3,7 +3,6 @@ package com.meflix.app.viewmodel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.meflix.app.data.AppPreferences
 import com.meflix.app.data.FolderStore
 import com.meflix.app.data.MediaScanner
 import com.meflix.app.data.ProgressInfo
