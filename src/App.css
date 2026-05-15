@@ -594,6 +594,30 @@ html, body {
 }
 .settings-add-btn:hover { border-color: rgba(255,255,255,0.35); color: var(--text-primary); }
 
+.folder-add-mobile { display: flex; flex-direction: column; gap: 10px; }
+.folder-quick-paths { display: flex; flex-wrap: wrap; gap: 8px; }
+.folder-quick-chip {
+  padding: 7px 14px; border-radius: 20px; font-size: 0.82rem; font-family: inherit;
+  background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text-secondary); cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.folder-quick-chip:hover:not(:disabled) { background: rgba(255,255,255,0.14); color: var(--text-primary); }
+.folder-quick-chip:disabled { opacity: 0.35; cursor: default; }
+.folder-manual-row { display: flex; gap: 8px; }
+.folder-path-input {
+  flex: 1; padding: 9px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text-primary); outline: none;
+}
+.folder-path-input:focus { border-color: rgba(255,255,255,0.35); }
+.folder-path-input::placeholder { color: var(--text-muted); }
+.folder-add-go {
+  padding: 9px 16px; border-radius: 4px; font-size: 0.85rem; font-family: inherit;
+  background: var(--accent-red); border: none; color: #fff; font-weight: 600;
+  cursor: pointer; transition: opacity 0.15s; white-space: nowrap;
+}
+.folder-add-go:hover { opacity: 0.85; }
+
 .settings-actions { display: flex; gap: 10px; margin-top: 28px; }
 .settings-save {
   flex: 1; padding: 12px; border-radius: 4px;

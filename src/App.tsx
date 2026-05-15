@@ -214,6 +214,12 @@ export default function App() {
     } catch (e) { console.error("Dialog error:", e); }
   };
 
+  const addFolderPath = (path: string) => {
+    if (!settingsDraft.source_folders.includes(path)) {
+      setSettingsDraft(prev => ({ ...prev, source_folders: [...prev.source_folders, path] }));
+    }
+  };
+
   const removeFolder = (idx: number) => {
     setSettingsDraft(prev => ({ ...prev, source_folders: prev.source_folders.filter((_, i) => i !== idx) }));
   };
@@ -373,7 +379,7 @@ export default function App() {
           showApiKey={showApiKey} setShowApiKey={setShowApiKey}
           onClose={() => setShowSettings(false)}
           onSave={saveSettings}
-          onAddFolder={addFolder} onRemoveFolder={removeFolder}
+          onAddFolder={addFolder} onAddFolderPath={addFolderPath} onRemoveFolder={removeFolder}
         />
       )}
 
