@@ -29,23 +29,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meflix.app.data.TMDB_KEY
+import com.meflix.app.data.appDataStore
 import com.meflix.app.data.FolderStore
 import com.meflix.app.ui.theme.NetflixBlack
 import com.meflix.app.ui.theme.NetflixRed
 import com.meflix.app.viewmodel.LibraryViewModel
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-
-private val android.content.Context.dataStore: DataStore<Preferences>
-    by preferencesDataStore(name = "meflix_settings")
-
-val TMDB_API_KEY_KEY = stringPreferencesKey("tmdb_api_key")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,8 +52,8 @@ fun SettingsScreen(
     val folderStore = remember { FolderStore(context) }
     val scanFolders by folderStore.folders.collectAsState(initial = emptyList())
 
-    val savedApiKey by context.dataStore.data
-        .map { prefs -> prefs[TMDB_API_KEY_KEY] ?: "" }
+    val savedApiKey by context.appDataStore.data
+        .map { prefs -> prefs[TMDB_KEY] ?: "" }
         .collectAsState(initial = "")
 
     var apiKeyInput by remember(savedApiKey) { mutableStateOf(savedApiKey) }
@@ -239,8 +232,8 @@ fun SettingsScreen(
                     Button(
                         onClick = {
                             scope.launch {
-                                context.dataStore.edit { prefs ->
-                                    prefs[TMDB_API_KEY_KEY] = apiKeyInput.trim()
+                                context.appDataStore.edit { prefs ->
+                                    prefs[TMDB_KEY] = apiKeyInput.trim()
                                 }
                                 showSavedSnack = true
                             }

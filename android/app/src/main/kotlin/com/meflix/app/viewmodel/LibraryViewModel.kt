@@ -3,13 +3,16 @@ package com.meflix.app.viewmodel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.meflix.app.data.AppPreferences
 import com.meflix.app.data.FolderStore
 import com.meflix.app.data.MediaScanner
 import com.meflix.app.data.ProgressInfo
 import com.meflix.app.data.ProgressStore
 import com.meflix.app.data.TmdbRepository
+import com.meflix.app.data.appDataStore
 import com.meflix.app.data.model.MediaItem
 import com.meflix.app.data.model.MediaType
+import com.meflix.app.data.tmdbApiKeyFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -75,10 +78,15 @@ class LibraryViewModel : ViewModel() {
             _uiState.value = _uiState.value.copy(isScanning = true, error = null)
             try {
                 val folders = FolderStore(context).folders.first()
-                val scanner = MediaScanner(context, folders)
-                val items = scanner.scan()
+                val items = MediaScanner(context, folders).scan()
                 _library.value = items
                 refreshContinueWatching(context, items)
+
+                // Auto-fetch metadata if API key is configured and items need metadata
+                val apiKey = context.tmdbApiKeyFlow().first()
+                if (apiKey.isNotBlank() && items.any { it.tmdbId == null }) {
+                    fetchMetadata(context, apiKey)
+                }
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message ?: "Scan failed")
             } finally {
@@ -117,7 +125,6 @@ class LibraryViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             val store = ProgressStore(context)
             val result = mutableListOf<Pair<MediaItem, ProgressInfo>>()
-
             for (item in items) {
                 if (item.type == MediaType.SERIES) {
                     item.allEpisodes
@@ -131,7 +138,6 @@ class LibraryViewModel : ViewModel() {
                     }
                 }
             }
-
             _continueWatching.value = result.sortedByDescending { (_, prog) -> prog.positionMs }
         }
     }
@@ -145,5 +151,4 @@ class LibraryViewModel : ViewModel() {
         }
         return genreMap.filter { it.value.size >= 2 }
     }
-
 }

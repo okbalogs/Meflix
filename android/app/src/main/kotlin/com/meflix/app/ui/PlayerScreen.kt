@@ -130,10 +130,10 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = false
-                    player = viewModel.player
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                 }
             },
+            update = { view -> view.player = viewModel.player },
             modifier = Modifier.fillMaxSize()
         )
 
