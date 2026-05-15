@@ -47,6 +47,7 @@ import com.meflix.app.viewmodel.TrackInfo
 import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
     item: MediaItem,
