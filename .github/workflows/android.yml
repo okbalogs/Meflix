@@ -81,6 +81,14 @@ jobs:
       - name: Initialize Tauri Android project
         run: npm run tauri android init
 
+      - name: Patch AndroidManifest with storage permissions
+        run: |
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Insert storage permission lines just before <application
+          sed -i 's|<application|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <application|' "$MANIFEST"
+          echo "=== Patched manifest ==="
+          grep -A 5 "READ_EXTERNAL" "$MANIFEST" || echo "WARNING: patch may have failed"
+
       - name: Build debug APK
         run: npm run tauri android build -- --debug
 
