@@ -1,10 +1,14 @@
-name: Meflix
+name: Meflix Android (Tauri)
 
 on:
   push:
     branches: [main, "claude/gradle-debug-build-QxixK"]
     paths:
-      - "android/**"
+      - "src/**"
+      - "src-tauri/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -17,50 +21,86 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── Node ─────────────────────────────────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ── Java (Android Gradle needs it) ────────────────────────────────────
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Accept Android SDK licenses and install required packages
+      # ── Android SDK + NDK ─────────────────────────────────────────────────
+      - name: Install Android SDK components and NDK
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
             "platforms;android-34" \
             "build-tools;34.0.0" \
-            "platform-tools"
+            "platform-tools" \
+            "ndk;25.2.9519653"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653"         >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"                   >> $GITHUB_ENV
 
-      - name: Verify Android SDK
+      # ── Rust ─────────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Android Rust targets
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms/android-34/android.jar" && echo "android-34 OK" || echo "android-34 MISSING"
-          ls "$ANDROID_HOME/build-tools/34.0.0/aapt" && echo "build-tools OK" || echo "build-tools MISSING"
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            i686-linux-android \
+            x86_64-linux-android
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-android-
+
+      # ── Frontend ──────────────────────────────────────────────────────────
+      - name: Install npm dependencies
+        run: npm ci
+
+      # ── Tauri Android ─────────────────────────────────────────────────────
+      - name: Initialize Tauri Android project
+        run: npm run tauri android init
 
       - name: Build debug APK
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace 2>&1 | tee /tmp/gradle-build.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          exit $BUILD_STATUS
+        run: npm run tauri android build -- --debug
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Show build errors
         if: failure()
         run: |
-          echo "=== Kotlin compiler errors ==="
-          grep -E "^e: |^w: " /tmp/gradle-build.log | head -50 || true
-          echo "=== Gradle failure details ==="
-          grep -A 20 "FAILURE: Build failed" /tmp/gradle-build.log | head -40 || true
-          echo "=== Failed tasks ==="
-          grep " FAILED" /tmp/gradle-build.log | head -10 || true
-          echo "=== Last 80 lines ==="
-          tail -80 /tmp/gradle-build.log || true
+          echo "=== Last Cargo errors ==="
+          find src-tauri/target -name "*.log" 2>/dev/null \
+            | xargs grep -l "^error" 2>/dev/null | head -3 | xargs cat 2>/dev/null || true
+          echo "=== Gradle log tail ==="
+          find src-tauri/gen/android -name "*.log" 2>/dev/null \
+            | xargs tail -n 60 2>/dev/null || true
 
+      # ── Artifact ──────────────────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: meflix-android-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
           if-no-files-found: error
           retention-days: 30
