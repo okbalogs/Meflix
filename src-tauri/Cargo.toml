@@ -1,6 +1,6 @@
 [package]
 name = "meflix"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -28,9 +28,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["full"] }
 regex = "1"
 dirs = "6"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-open = "5.1.4"
 axum = "0.7"
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+open = "5.1.4"

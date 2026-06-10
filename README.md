@@ -1,6 +1,6 @@
 # Meflix
 
-A Netflix-style local media player built with Tauri, React, and Rust. Meflix lets you organize and watch your personal movie and TV show collection with a polished streaming-service UI — complete with metadata, artwork, and playback features — entirely offline on your desktop.
+A Netflix-style local media player built with Tauri, React, and Rust. Meflix lets you organize and watch your personal movie and TV show collection with a polished streaming-service UI — complete with metadata, artwork, and playback features — entirely offline, on desktop (Linux, macOS, Windows) and Android.
 
 ## Features
 
@@ -22,11 +22,11 @@ A Netflix-style local media player built with Tauri, React, and Rust. Meflix let
 
 | Layer | Technology |
 |-------|-----------|
-| Desktop shell | Tauri v2 |
+| App shell | Tauri v2 (desktop + Android) |
 | Frontend | React 19, TypeScript, Vite |
 | Backend | Rust |
 | Metadata | TMDB API |
-| Video transcoding | FFmpeg (streams MKV/AVI/FLV via local HTTP server) |
+| Video transcoding | FFmpeg (streams MKV/AVI/FLV via local HTTP server; bundled LGPL build on Android) |
 
 ## Getting Started
 
@@ -51,6 +51,21 @@ npm run tauri dev
 npm run tauri build
 ```
 
+On Linux this produces `.deb`, `.rpm`, and `.AppImage` bundles (the deb/rpm declare a dependency on the system `ffmpeg` package). The **Build Linux Packages** GitHub Actions workflow builds the same bundles and attaches them to GitHub Releases on `v*` tags.
+
+### Android
+
+The **Build Android APK** GitHub Actions workflow produces an arm64 APK with a bundled LGPL FFmpeg (no system FFmpeg needed). To build locally with the Android SDK + NDK installed:
+
+```bash
+bash scripts/fetch-android-ffmpeg.sh        # download pinned FFmpeg prebuilts
+npm run tauri android init
+python3 scripts/android/patch-android-project.py  # permissions + FFmpeg packaging
+npm run tauri android build -- --apk --target aarch64
+```
+
+On Android, Meflix automatically scans the standard media folders (`Movies`, `Download`, `Videos`, `DCIM`) — there is no folder picker. Playback remuxes through the bundled FFmpeg: H.264/HEVC/VP9/AV1 video plays without re-encoding, and non-AAC audio is transcoded on the fly. Files with video codecs your device cannot decode will not play (the bundled LGPL FFmpeg has no H.264 encoder).
+
 ### Type-checking only
 
 ```bash
@@ -64,14 +79,16 @@ On first launch, open **Settings** (gear icon in the navbar) and:
 1. Add one or more **source folders** containing your media files
 2. Optionally paste a **TMDB API key** to enable automatic metadata and artwork fetching
 
-Settings are saved to `~/.meflix/config.json`. Metadata and poster images are cached under `~/.meflix/` so they are only fetched once.
+Settings are saved to `~/.meflix/config.json` (on Android: the app's data directory). Metadata and poster images are cached alongside it so they are only fetched once.
 
 ## Supported Formats
 
 | Format | Playback method |
 |--------|----------------|
-| MP4, M4V, WebM, MOV | Native browser playback via Tauri asset protocol |
-| MKV, AVI, FLV | Transcoded to fragmented MP4 on the fly via a local FFmpeg HTTP server on port 1421 |
+| MP4, M4V, WebM | Native browser playback via Tauri asset protocol (desktop) |
+| MKV, AVI, FLV, MOV | Remuxed/transcoded to fragmented MP4 on the fly via a local FFmpeg HTTP server on port 1421 |
+
+On Android, all playback is routed through the local FFmpeg server (stream-copy when the codecs allow it).
 
 ## File Naming
 

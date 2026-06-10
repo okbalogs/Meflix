@@ -9,12 +9,11 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use reqwest;
 
-#[cfg(not(target_os = "android"))]
 use axum::extract::Query;
-#[cfg(not(target_os = "android"))]
 use axum::response::IntoResponse;
-#[cfg(not(target_os = "android"))]
 use std::process::Stdio;
+use std::sync::OnceLock;
+use tauri::Manager;
 
 // ─── Data Structures ───────────────────────────────────────────────────────
 
@@ -112,12 +111,61 @@ struct TmdbGenre {
 
 // ─── Helper: Get app data directory ────────────────────────────────────────
 
+// Set once in `setup`: ~/.meflix on desktop, app_data_dir/meflix on Android
+// (Android has no writable home directory).
+static MEFLIX_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn default_meflix_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".meflix")
+}
+
 fn get_meflix_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let meflix_dir = home.join(".meflix");
+    let meflix_dir = MEFLIX_DIR.get().cloned().unwrap_or_else(default_meflix_dir);
     fs::create_dir_all(&meflix_dir).ok();
     fs::create_dir_all(meflix_dir.join("posters")).ok();
     meflix_dir
+}
+
+// ─── Helper: FFmpeg binary locations ───────────────────────────────────────
+//
+// Desktop resolves ffmpeg/ffprobe from PATH. On Android the static binaries
+// are packaged as fake jniLibs (libffmpeg.so / libffprobe.so) so the system
+// extracts them into nativeLibraryDir — the only location an app may exec
+// from. We locate that directory by finding our own cdylib in /proc/self/maps.
+
+#[cfg(target_os = "android")]
+fn native_lib_dir() -> Option<PathBuf> {
+    let maps = fs::read_to_string("/proc/self/maps").ok()?;
+    maps.lines()
+        .filter_map(|l| l.rsplit_once(' ').map(|(_, p)| p.trim()))
+        .find(|p| p.ends_with("libmeflix_lib.so"))
+        .and_then(|p| Path::new(p).parent().map(|d| d.to_path_buf()))
+}
+
+#[cfg(target_os = "android")]
+fn android_tool_path(name: &str) -> Option<String> {
+    let path = native_lib_dir()?.join(name);
+    path.exists().then(|| path.to_string_lossy().into_owned())
+}
+
+fn ffmpeg_path() -> String {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(p) = android_tool_path("libffmpeg.so") {
+            return p;
+        }
+    }
+    "ffmpeg".to_string()
+}
+
+fn ffprobe_path() -> String {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(p) = android_tool_path("libffprobe.so") {
+            return p;
+        }
+    }
+    "ffprobe".to_string()
 }
 
 // ─── Filename Parser ───────────────────────────────────────────────────────
@@ -702,10 +750,36 @@ fn save_metadata_cache(cache: &MetadataCache) {
 
 // ─── Settings ──────────────────────────────────────────────────────────────
 
+// On Android there is no folder picker; the standard shared-storage media
+// folders are scanned instead.
+#[cfg(target_os = "android")]
+const ANDROID_MEDIA_DIRS: &[&str] = &[
+    "/storage/emulated/0/Movies",
+    "/storage/emulated/0/Download",
+    "/storage/emulated/0/Videos",
+    "/storage/emulated/0/DCIM",
+];
+
+#[cfg(target_os = "android")]
+fn android_default_folders() -> Vec<String> {
+    let existing: Vec<String> = ANDROID_MEDIA_DIRS
+        .iter()
+        .filter(|p| Path::new(p).is_dir())
+        .map(|p| p.to_string())
+        .collect();
+    if existing.is_empty() {
+        // Permission may not be granted yet, so is_dir() can fail; return the
+        // full list and let scan_folders skip whatever is unreadable.
+        ANDROID_MEDIA_DIRS.iter().map(|p| p.to_string()).collect()
+    } else {
+        existing
+    }
+}
+
 #[tauri::command]
 fn load_settings() -> AppSettings {
     let settings_path = get_meflix_dir().join("config.json");
-    if let Ok(data) = fs::read_to_string(&settings_path) {
+    let settings = if let Ok(data) = fs::read_to_string(&settings_path) {
         serde_json::from_str(&data).unwrap_or(AppSettings {
             tmdb_api_key: None,
             source_folders: vec![],
@@ -715,11 +789,25 @@ fn load_settings() -> AppSettings {
             tmdb_api_key: None,
             source_folders: vec![],
         }
-    }
+    };
+    #[cfg(target_os = "android")]
+    let settings = {
+        let mut settings = settings;
+        if settings.source_folders.is_empty() {
+            settings.source_folders = android_default_folders();
+        }
+        settings
+    };
+    settings
 }
 
 #[tauri::command]
-fn save_settings(settings: AppSettings) -> Result<(), String> {
+fn save_settings(app: tauri::AppHandle, settings: AppSettings) -> Result<(), String> {
+    for folder in &settings.source_folders {
+        app.asset_protocol_scope()
+            .allow_directory(Path::new(folder), true)
+            .ok();
+    }
     let settings_path = get_meflix_dir().join("config.json");
     let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(settings_path, data).map_err(|e| e.to_string())?;
@@ -782,7 +870,14 @@ async fn fetch_recommendations(
     Ok(recs)
 }
 
-// ─── Desktop-only: Play Media, FFmpeg, Streaming Server ───────────────────
+// ─── Platform info ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
+// ─── Play Media, FFmpeg, Streaming Server ──────────────────────────────────
 
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
@@ -790,10 +885,15 @@ async fn play_media(path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| format!("Failed to open media: {}", e))
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn play_media(_path: String) -> Result<(), String> {
+    Err("External playback is not supported on Android".to_string())
+}
+
 #[tauri::command]
 async fn check_ffmpeg() -> bool {
-    tokio::process::Command::new("ffmpeg")
+    tokio::process::Command::new(ffmpeg_path())
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -802,15 +902,14 @@ async fn check_ffmpeg() -> bool {
         .is_ok()
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn probe_codecs(path: String) -> Result<String, String> {
-    let v_out = tokio::process::Command::new("ffprobe")
+    let v_out = tokio::process::Command::new(ffprobe_path())
         .args(&["-v", "error", "-select_streams", "V:0",
                 "-show_entries", "stream=codec_name",
                 "-of", "default=noprint_wrappers=1:nokey=1", &path])
         .output().await.map_err(|e| e.to_string())?;
-    let a_out = tokio::process::Command::new("ffprobe")
+    let a_out = tokio::process::Command::new(ffprobe_path())
         .args(&["-v", "error", "-select_streams", "a:0",
                 "-show_entries", "stream=codec_name",
                 "-of", "default=noprint_wrappers=1:nokey=1", &path])
@@ -820,7 +919,6 @@ async fn probe_codecs(path: String) -> Result<String, String> {
     Ok(format!("{}:{}", video, audio))
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MediaInfo {
     pub duration: f64,
@@ -828,7 +926,6 @@ pub struct MediaInfo {
     pub chapters: Vec<MediaChapter>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MediaChapter {
     pub id: u64,
@@ -837,7 +934,6 @@ pub struct MediaChapter {
     pub title: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MediaStream {
     pub index: u32,
@@ -847,7 +943,6 @@ pub struct MediaStream {
     pub title: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct FfprobeOutput {
     streams: Vec<FfprobeStream>,
@@ -855,7 +950,6 @@ struct FfprobeOutput {
     chapters: Option<Vec<FfprobeChapter>>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct FfprobeChapter {
     id: u64,
@@ -864,13 +958,11 @@ struct FfprobeChapter {
     tags: Option<HashMap<String, String>>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct FfprobeFormat {
     duration: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct FfprobeStream {
     index: u32,
@@ -879,10 +971,9 @@ struct FfprobeStream {
     tags: Option<HashMap<String, String>>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn get_media_info(path: String) -> Result<MediaInfo, String> {
-    let out = tokio::process::Command::new("ffprobe")
+    let out = tokio::process::Command::new(ffprobe_path())
         .args(&[
             "-v", "quiet",
             "-print_format", "json",
@@ -950,21 +1041,28 @@ async fn get_media_info(path: String) -> Result<MediaInfo, String> {
     })
 }
 
-// ─── Desktop-only: Streaming Server ───────────────────────────────────────
+// ─── Streaming Server ──────────────────────────────────────────────────────
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct StreamQuery {
     path: String,
+    /// Video codec: "copy" or an encoder name. Defaults: "copy" on Android
+    /// (the LGPL build has no x264), "libx264" on desktop.
+    vc: Option<String>,
+    /// Audio codec: "copy" or an encoder name (default "aac").
+    ac: Option<String>,
+    /// Legacy flag, equivalent to vc=copy&ac=copy.
     copy: Option<bool>,
     a: Option<u32>,
     start: Option<f64>,
 }
 
-#[cfg(not(target_os = "android"))]
 async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
     let path = q.path;
-    let use_copy = q.copy.unwrap_or(false);
+    let legacy_copy = q.copy.unwrap_or(false);
+    let default_vc = if cfg!(target_os = "android") { "copy" } else { "libx264" };
+    let vc = q.vc.unwrap_or_else(|| if legacy_copy { "copy".into() } else { default_vc.into() });
+    let ac = q.ac.unwrap_or_else(|| if legacy_copy { "copy".into() } else { "aac".into() });
 
     if !Path::new(&path).exists() {
         return axum::response::Response::builder()
@@ -973,7 +1071,7 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
             .unwrap();
     }
 
-    let ffmpeg_check = tokio::process::Command::new("ffmpeg")
+    let ffmpeg_check = tokio::process::Command::new(ffmpeg_path())
         .arg("-version").stdout(Stdio::null()).stderr(Stdio::null())
         .status().await;
     if ffmpeg_check.is_err() {
@@ -997,17 +1095,20 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
     }
     args.extend(["-sn".into()]);
 
-    if use_copy {
-        args.extend(["-c:v".into(), "copy".into(), "-c:a".into(), "copy".into()]);
+    if vc == "copy" {
+        args.extend(["-c:v".into(), "copy".into()]);
     } else {
         args.extend([
-            "-c:v".into(), "libx264".into(),
+            "-c:v".into(), vc.clone(),
             "-preset".into(), "veryfast".into(),
             "-crf".into(), "23".into(),
             "-pix_fmt".into(), "yuv420p".into(),
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), "192k".into(),
         ]);
+    }
+    if ac == "copy" {
+        args.extend(["-c:a".into(), "copy".into()]);
+    } else {
+        args.extend(["-c:a".into(), ac.clone(), "-b:a".into(), "192k".into()]);
     }
     args.extend([
         "-movflags".into(), "frag_keyframe+empty_moov+faststart".into(),
@@ -1015,7 +1116,7 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
         "pipe:1".into(),
     ]);
 
-    let child = tokio::process::Command::new("ffmpeg")
+    let child = tokio::process::Command::new(ffmpeg_path())
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1039,7 +1140,6 @@ async fn stream_handler(Query(q): Query<StreamQuery>) -> impl IntoResponse {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Deserialize)]
 struct SubtitleQuery {
     path: String,
@@ -1047,7 +1147,6 @@ struct SubtitleQuery {
     start: Option<f64>,
 }
 
-#[cfg(not(target_os = "android"))]
 async fn subtitle_handler(Query(q): Query<SubtitleQuery>) -> impl IntoResponse {
     let path = q.path;
     let s_idx = q.s;
@@ -1071,7 +1170,7 @@ async fn subtitle_handler(Query(q): Query<SubtitleQuery>) -> impl IntoResponse {
         "pipe:1".into(),
     ]);
 
-    let child = tokio::process::Command::new("ffmpeg")
+    let child = tokio::process::Command::new(ffmpeg_path())
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1095,7 +1194,6 @@ async fn subtitle_handler(Query(q): Query<SubtitleQuery>) -> impl IntoResponse {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn start_streaming_server() {
     tauri::async_runtime::spawn(async move {
         let app = axum::Router::new()
@@ -1112,46 +1210,44 @@ fn start_streaming_server() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(not(target_os = "android"))]
-    start_streaming_server();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            #[cfg(target_os = "android")]
+            {
+                let data_dir = app.path().app_data_dir()?.join("meflix");
+                MEFLIX_DIR.set(data_dir).ok();
+            }
+            #[cfg(not(target_os = "android"))]
+            MEFLIX_DIR.set(default_meflix_dir()).ok();
 
-    #[cfg(not(target_os = "android"))]
-    {
-        tauri::Builder::default()
-            .plugin(tauri_plugin_fs::init())
-            .plugin(tauri_plugin_dialog::init())
-            .plugin(tauri_plugin_opener::init())
-            .invoke_handler(tauri::generate_handler![
-                scan_folders,
-                fetch_metadata,
-                fetch_all_metadata,
-                play_media,
-                load_settings,
-                save_settings,
-                check_ffmpeg,
-                probe_codecs,
-                fetch_recommendations,
-                get_media_info,
-            ])
-            .run(tauri::generate_context!())
-            .expect("error while running tauri application");
-    }
+            // The static asset-protocol scope only covers the meflix dir;
+            // user-selected media folders are allowed in at runtime so
+            // direct playback via convertFileSrc works from anywhere.
+            let scope = app.asset_protocol_scope();
+            scope.allow_directory(get_meflix_dir(), true).ok();
+            for folder in load_settings().source_folders {
+                scope.allow_directory(Path::new(&folder), true).ok();
+            }
 
-    #[cfg(target_os = "android")]
-    {
-        tauri::Builder::default()
-            .plugin(tauri_plugin_fs::init())
-            .plugin(tauri_plugin_dialog::init())
-            .plugin(tauri_plugin_opener::init())
-            .invoke_handler(tauri::generate_handler![
-                scan_folders,
-                fetch_metadata,
-                fetch_all_metadata,
-                load_settings,
-                save_settings,
-                fetch_recommendations,
-            ])
-            .run(tauri::generate_context!())
-            .expect("error while running tauri application");
-    }
+            start_streaming_server();
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            scan_folders,
+            fetch_metadata,
+            fetch_all_metadata,
+            play_media,
+            load_settings,
+            save_settings,
+            check_ffmpeg,
+            probe_codecs,
+            fetch_recommendations,
+            get_media_info,
+            get_platform,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }

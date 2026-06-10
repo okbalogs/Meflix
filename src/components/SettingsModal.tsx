@@ -12,14 +12,17 @@ interface SettingsModalProps {
   onSave: () => void;
   onAddFolder: () => void;
   onRemoveFolder: (idx: number) => void;
+  platform: string;
 }
 
 export default function SettingsModal({
   settingsDraft, setSettingsDraft,
   showApiKey, setShowApiKey,
   onClose, onSave, onAddFolder, onRemoveFolder,
+  platform,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("library");
+  const isAndroid = platform === "android";
 
   return (
     <div className="settings-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -62,7 +65,7 @@ export default function SettingsModal({
 
             <div className="settings-v2-app-info">
               <div className="settings-v2-app-name">Meflix</div>
-              <div className="settings-v2-app-version">v0.1.0</div>
+              <div className="settings-v2-app-version">v0.2.0</div>
             </div>
           </nav>
 
@@ -73,7 +76,9 @@ export default function SettingsModal({
                 <div className="settings-v2-section-header">
                   <div className="settings-v2-section-title">Media Library</div>
                   <p className="settings-v2-section-desc">
-                    Meflix scans these folders for movies and TV shows. Changes take effect after saving.
+                    {isAndroid
+                      ? "Meflix automatically scans the standard media folders on your device for movies and TV shows."
+                      : "Meflix scans these folders for movies and TV shows. Changes take effect after saving."}
                   </p>
                 </div>
 
@@ -92,21 +97,25 @@ export default function SettingsModal({
                         <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
                       </svg>
                       <span className="folder-path" title={f}>{f}</span>
-                      <button className="folder-remove" onClick={() => onRemoveFolder(i)} title="Remove folder">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                        </svg>
-                      </button>
+                      {!isAndroid && (
+                        <button className="folder-remove" onClick={() => onRemoveFolder(i)} title="Remove folder">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                          </svg>
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
 
-                <button className="settings-add-btn" onClick={onAddFolder}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  Add Media Folder
-                </button>
+                {!isAndroid && (
+                  <button className="settings-add-btn" onClick={onAddFolder}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Add Media Folder
+                  </button>
+                )}
               </div>
             )}
 

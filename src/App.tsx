@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { MediaItem, AppSettings } from "./types";
 import { toPlaySrc, buildSeriesQueue } from "./utils";
+import { getPlatform } from "./platform";
 import { loadAllProgress, type ProgressStore } from "./progressStore";
 import { loadMyList, toggleMyList } from "./myList";
 import { loadFirstSeen, trackNewItems, type FirstSeenStore } from "./recentlyAdded";
@@ -49,6 +50,7 @@ export default function App() {
   const [myList, setMyList] = useState<string[]>(() => loadMyList());
   const [firstSeenStore, setFirstSeenStore] = useState<FirstSeenStore>(() => loadFirstSeen());
   const [pendingPlay, setPendingPlay] = useState<{ item: MediaItem; startPath?: string; resumeAt: number } | null>(null);
+  const [platform, setPlatform] = useState<string>("linux");
 
   const toastTimer = useRef<number | null>(null);
 
@@ -62,6 +64,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      getPlatform().then(setPlatform);
       try {
         const s = await invoke<AppSettings>("load_settings");
         setSettings(s);
@@ -206,6 +209,7 @@ export default function App() {
   const openSettings = () => { setSettingsDraft({ ...settings }); setShowSettings(true); };
 
   const addFolder = async () => {
+    if (platform === "android") return; // standard media folders are scanned automatically
     try {
       const selected = await open({ directory: true, multiple: false, title: "Select Media Folder" });
       if (selected && !settingsDraft.source_folders.includes(selected as string)) {
@@ -324,8 +328,18 @@ export default function App() {
         <div className="empty-state">
           <div className="empty-icon">🎬</div>
           <div className="empty-title">Welcome to Meflix</div>
-          <div className="empty-subtitle">Add your media folders to get started</div>
-          <button className="empty-btn" onClick={openSettings}>Open Settings</button>
+          {platform === "android" ? (
+            <>
+              <div className="empty-subtitle">Meflix scans the Movies, Download, Videos and DCIM folders on your device</div>
+              <button className="empty-btn" onClick={() => scanLibrary(settings.source_folders, settings.tmdb_api_key)}>Scan Library</button>
+              <button className="empty-btn secondary" onClick={openSettings}>Open Settings</button>
+            </>
+          ) : (
+            <>
+              <div className="empty-subtitle">Add your media folders to get started</div>
+              <button className="empty-btn" onClick={openSettings}>Open Settings</button>
+            </>
+          )}
         </div>
       ) : loading && library.length === 0 ? (
         <>
@@ -374,6 +388,7 @@ export default function App() {
           onClose={() => setShowSettings(false)}
           onSave={saveSettings}
           onAddFolder={addFolder} onRemoveFolder={removeFolder}
+          platform={platform}
         />
       )}
 

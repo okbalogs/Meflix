@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { isAndroid } from "./platform";
 import type { MediaItem } from "./types";
+
+export const STREAM_BASE = "http://127.0.0.1:1421";
 
 export const GRADIENTS = ["gradient-1","gradient-2","gradient-3","gradient-4","gradient-5"];
 
@@ -16,23 +19,40 @@ export function cleanEpisodeName(name: string): string {
   return cleaned.trim();
 }
 
+// Codecs the Android WebView / device decoders handle when remuxed into
+// fragmented MP4. The bundled LGPL FFmpeg has no H.264 encoder, so on Android
+// the server stream-copies video whenever possible and only re-encodes audio.
+const ANDROID_COPYABLE_VIDEO = ["h264", "hevc", "vp9", "av1"];
+const COPYABLE_AUDIO = ["aac", "mp3"];
+
 export async function toPlaySrc(path: string, audioIdx: number | null = null, start: number | null = null): Promise<string> {
   const ext = path.split('.').pop()?.toLowerCase() || '';
-  if (['mkv', 'avi', 'flv', 'mov'].includes(ext)) {
-    const audioQuery = audioIdx !== null ? `&a=${audioIdx}` : '';
-    const startQuery = start !== null ? `&start=${start}` : '';
-    if (ext === 'mkv') {
-      try {
-        const codecs = await invoke<string>("probe_codecs", { path });
-        const [vcodec, acodec] = codecs.split(':');
-        if (vcodec === 'h264' && acodec === 'aac') {
-          return `http://127.0.0.1:1421/stream?path=${encodeURIComponent(path)}&copy=true${audioQuery}${startQuery}`;
-        }
-      } catch { /* fall through to full transcode */ }
+  const android = await isAndroid();
+  // Android routes everything through the local server: remuxing is cheap and
+  // it avoids asset-protocol scoping issues with /storage paths.
+  const serverRouted = android || ['mkv', 'avi', 'flv', 'mov'].includes(ext);
+  if (!serverRouted) return convertFileSrc(path);
+
+  let vc = android ? 'copy' : 'libx264';
+  let ac = android ? 'copy' : 'aac';
+  try {
+    const codecs = await invoke<string>("probe_codecs", { path });
+    const [vcodec, acodec] = codecs.split(':');
+    if (android) {
+      // mpeg4 is the only LGPL software encoder available as a last resort.
+      vc = ANDROID_COPYABLE_VIDEO.includes(vcodec) ? 'copy' : 'mpeg4';
+      ac = COPYABLE_AUDIO.includes(acodec) ? 'copy' : 'aac';
+    } else {
+      vc = vcodec === 'h264' ? 'copy' : 'libx264';
+      ac = acodec === 'aac' ? 'copy' : 'aac';
     }
-    return `http://127.0.0.1:1421/stream?path=${encodeURIComponent(path)}${audioQuery}${startQuery}`;
-  }
-  return convertFileSrc(path);
+  } catch { /* keep defaults: copy-all attempt on Android, full transcode on desktop */ }
+  const q = new URLSearchParams({ path, vc, ac });
+  // Note: probe_codecs reports the first audio track; when a different track
+  // is selected the worst case is an already-AAC track getting re-encoded.
+  if (audioIdx !== null) q.set('a', String(audioIdx));
+  if (start !== null) q.set('start', String(start));
+  return `${STREAM_BASE}/stream?${q.toString()}`;
 }
 
 export function buildSeriesQueue(series: MediaItem): Array<{ path: string; title: string }> {

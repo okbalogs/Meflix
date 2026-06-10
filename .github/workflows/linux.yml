@@ -1,0 +1,68 @@
+name: Build Linux Packages
+
+on:
+  push:
+    branches: ["claude/android-linux-optimization-5jfmbz"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    # Older LTS keeps the AppImage's glibc requirement low
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf \
+            build-essential curl wget file libxdo-dev libssl-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri bundles (deb, rpm, AppImage)
+        run: npm run tauri build
+
+      - name: Verify deb metadata
+        run: |
+          DEB=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -n1)
+          dpkg-deb -I "$DEB"
+          dpkg-deb -I "$DEB" | grep -q 'Depends:.*ffmpeg' || { echo "deb is missing the ffmpeg dependency"; exit 1; }
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: meflix-linux-bundles
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.AppImage

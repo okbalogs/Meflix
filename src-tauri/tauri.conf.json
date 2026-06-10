@@ -28,18 +28,28 @@
           "deny": []
         }
       },
-      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost blob:; media-src 'self' asset: https://asset.localhost blob: http://127.0.0.1:1421; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.themoviedb.org https://image.tmdb.org http://127.0.0.1:1421"
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost http://asset.localhost blob:; media-src 'self' asset: https://asset.localhost http://asset.localhost blob: http://127.0.0.1:1421; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ipc: http://ipc.localhost https://api.themoviedb.org https://image.tmdb.org http://127.0.0.1:1421"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "appimage"],
+    "category": "Video",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["ffmpeg"],
+        "section": "video"
+      },
+      "rpm": {
+        "depends": ["ffmpeg"]
+      }
+    }
   }
 }
