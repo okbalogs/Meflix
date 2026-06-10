@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem, TmdbRecommendation, MediaStream, MediaInfo, MediaChapter } from "../types";
 import { saveWatchRecord } from "../progressStore";
+import { getPlatform } from "../platform";
+import { STREAM_BASE } from "../utils";
 
 const getLanguageName = (code?: string | null) => {
   if (!code || code === 'und') return null;
@@ -77,6 +79,10 @@ export default function VideoPlayer({
   const isSeekingRef = useRef(false);
   const suggestionsShownRef = useRef(false);
   const progressTrackRef = useRef<HTMLDivElement>(null);
+  const showControlsRef = useRef(true);
+  useEffect(() => { showControlsRef.current = showControls; }, [showControls]);
+  const [platform, setPlatform] = useState<string>("linux");
+  useEffect(() => { getPlatform().then(setPlatform); }, []);
 
   // Stable refs for progress saving (avoid stale closures in intervals/cleanup)
   const rawPathRef = useRef(rawPath);
@@ -301,13 +307,21 @@ export default function VideoPlayer({
     triggerSeek(newTime);
   };
 
-  const handleSeekMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  // Pointer events cover both mouse drag and touch scrubbing
+  const handleSeekPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     isSeekingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
     seekToPosition(e.clientX);
-    const onMove = (ev: MouseEvent) => seekToPosition(ev.clientX);
-    const onUp = () => { isSeekingRef.current = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    const onMove = (ev: PointerEvent) => seekToPosition(ev.clientX);
+    const onUp = () => {
+      isSeekingRef.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -351,6 +365,7 @@ export default function VideoPlayer({
       ref={playerRef}
       className={`video-player-overlay ${showControls && !isEndscreenActive ? "controls-active" : "controls-hidden"} ${isEndscreenActive ? "vp-endscreen-active" : ""}`}
       onMouseMove={resetControlsTimer}
+      onPointerDown={resetControlsTimer}
       onMouseLeave={() => {
         if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
         controlsTimerRef.current = window.setTimeout(() => setShowControls(false), 1000);
@@ -362,13 +377,15 @@ export default function VideoPlayer({
         src={activeSrc}
         autoPlay
         onTimeUpdate={handleTimeUpdate}
-        onClick={togglePlay}
+        // On touch the first tap just reveals the controls; only toggle play
+        // when they were already visible.
+        onClick={() => { if (showControlsRef.current) togglePlay(); else resetControlsTimer(); }}
         onDoubleClick={toggleFullscreen}
         onWaiting={() => setIsBuffering(true)}
         onCanPlay={() => setIsBuffering(false)}
         onPlaying={() => { setIsBuffering(false); setPlaying(true); }}
         onPause={() => setPlaying(false)}
-        onError={() => { setHasError(true); setIsBuffering(false); if (onToast) onToast("Unable to play this file. FFmpeg may be required."); }}
+        onError={() => { setHasError(true); setIsBuffering(false); if (onToast) onToast(platform === "android" ? "Unable to play this file on this device." : "Unable to play this file. FFmpeg may be required."); }}
         onLoadedMetadata={() => {
           if (!videoRef.current) return;
           setDuration(videoRef.current.duration);
@@ -382,7 +399,7 @@ export default function VideoPlayer({
         {selectedSubtitle !== null && rawPath && (
           <track
             kind="subtitles"
-            src={`http://127.0.0.1:1421/subtitle?path=${encodeURIComponent(rawPath)}&s=${selectedSubtitle}${streamOffset > 0 ? `&start=${streamOffset}` : ''}`}
+            src={`${STREAM_BASE}/subtitle?path=${encodeURIComponent(rawPath)}&s=${selectedSubtitle}${streamOffset > 0 ? `&start=${streamOffset}` : ''}`}
             default
           />
         )}
@@ -394,7 +411,11 @@ export default function VideoPlayer({
       {hasError && (
         <div className="vp-error">
           <div className="vp-error-icon">⚠</div>
-          <div className="vp-error-msg">Unable to play this file. FFmpeg is required for MKV/AVI/MOV playback.</div>
+          <div className="vp-error-msg">
+            {platform === "android"
+              ? "Unable to play this file on this device (unsupported codec)."
+              : "Unable to play this file. FFmpeg is required for MKV/AVI/MOV playback."}
+          </div>
           <button className="vp-error-btn" onClick={onClose}>Close Player</button>
         </div>
       )}
@@ -487,7 +508,7 @@ export default function VideoPlayer({
           {/* Bottom bar */}
           <div className="vp-bottom-bar">
         <div className="vp-progress-container">
-          <div className="vp-progress-track" ref={progressTrackRef} onMouseDown={handleSeekMouseDown}>
+          <div className="vp-progress-track" ref={progressTrackRef} onPointerDown={handleSeekPointerDown}>
             <div className="vp-progress-bg" />
             <div className="vp-progress-fill" style={{ width: `${progressPct}%` }} />
           </div>

@@ -621,6 +621,9 @@ html, body {
   margin-top: 8px;
 }
 .empty-btn:hover { opacity: 0.85; }
+.empty-btn.secondary {
+  background: rgba(255,255,255,0.15);
+}
 
 /* ─── Skeleton Loading ─── */
 @keyframes shimmer {
@@ -731,6 +734,12 @@ html, body {
 .vp-progress-track {
   flex: 1; position: relative; height: 4px;
   cursor: pointer;
+  touch-action: none; /* keep the page from scrolling while scrubbing */
+}
+/* Touch devices: thicker scrub target, hide the hover-only volume slider */
+@media (pointer: coarse) {
+  .vp-progress-track { height: 8px; }
+  .vp-volume-slider { display: none; }
 }
 .vp-progress-bg {
   position: absolute; inset: 0;

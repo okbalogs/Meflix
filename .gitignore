@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Tauri generated Android project (recreated by `tauri android init` in CI)
+src-tauri/gen/
+
+# Fetched FFmpeg prebuilts (scripts/fetch-android-ffmpeg.sh)
+src-tauri/android/bin/

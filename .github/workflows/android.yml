@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/android-linux-optimization-5jfmbz"]
   workflow_dispatch:
 
 jobs:
@@ -34,7 +34,7 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -44,15 +44,39 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Cache FFmpeg prebuilts
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/android/bin
+          key: android-ffmpeg-8.1.1-480defd7
+
+      - name: Fetch FFmpeg prebuilts (arm64)
+        run: bash scripts/fetch-android-ffmpeg.sh
+
       - name: Initialize Tauri Android project
         run: npm run tauri android init
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      - name: Build Android APK (debug)
-        run: npm run tauri android build -- --apk --debug
+      - name: Apply Android project patches
+        run: python3 scripts/android/patch-android-project.py
+
+      - name: Build Android APK (debug, arm64)
+        run: npm run tauri android build -- --apk --debug --target aarch64
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Verify APK contents
+        run: |
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)
+          echo "Checking $APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libffmpeg.so' || { echo "libffmpeg.so missing from APK"; exit 1; }
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libffprobe.so' || { echo "libffprobe.so missing from APK"; exit 1; }
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt | sort | tail -n1)
+          "$AAPT" dump xmltree "$APK" AndroidManifest.xml > manifest.txt
+          grep -q 'READ_MEDIA_VIDEO' manifest.txt || { echo "READ_MEDIA_VIDEO permission missing"; exit 1; }
+          grep -q 'extractNativeLibs.*0xffffffff\|extractNativeLibs(.*)=(type 0x12)0xffffffff' manifest.txt || echo "WARN: could not confirm extractNativeLibs=true (check manually)"
+          echo "APK verification passed"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
